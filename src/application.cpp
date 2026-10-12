@@ -55,14 +55,21 @@ void Application::init()
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
+
+    start();
 }
 
 // Start the app
 
 void Application::run()
 {
+    float last_time = (float)glfwGetTime();
     while (is_running && !glfwWindowShouldClose(window))
     {
+        float current_time = (float)glfwGetTime();
+        float delta_time = current_time - last_time;
+        last_time = current_time;
+
         glfwPollEvents();
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -120,7 +127,7 @@ void Application::run()
         }
         ImGui::End();
 
-        update();
+        update(delta_time);
 
         ImGui::Render();
 
@@ -144,12 +151,13 @@ void Application::run()
     }
 }
 
-// Example window
-void Application::example_window() { ImGui::ShowDemoWindow(); }
-
 // Your application logic here
 
-void Application::update() { example_window(); }
+void Application::update(float dt)
+{
+    tick(dt);
+    render(dt);
+}
 
 // GLFW, GLAD, ImGui cleanup
 

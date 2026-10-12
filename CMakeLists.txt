@@ -101,7 +101,8 @@ add_custom_target(update_resources ALL
 add_dependencies(${PROJECT_NAME} update_shaders)
 add_dependencies(${PROJECT_NAME} update_resources)
 
-target_include_directories(${PROJECT_NAME} PRIVATE 
+target_include_directories(${PROJECT_NAME} PRIVATE
+    src
     dependencies
     dependencies/glfw/include
     ${IMGUI_DIR}

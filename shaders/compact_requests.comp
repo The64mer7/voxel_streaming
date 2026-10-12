@@ -1,0 +1,14 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32ui, binding = 1) uniform uimage2D u_requests;
+
+uniform uvec2 read_size;
+uniform uvec2 write_size;
+
+
+void main()
+{
+
+}
