@@ -1,0 +1,7 @@
+build/
+out/
+.vs/
+**/_deps/
+*.exe
+*.obj
+*.pdb
