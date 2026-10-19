@@ -126,3 +126,5 @@ using quadtree_node_o16u = sparse_tree_node<DataT, uint8_t, 1, uint16_t, 4>;
 template <typename DataT>
 using quadtree_node_o8u = sparse_tree_node<DataT, uint8_t, 1, uint8_t, 4>;
 } // namespace svo
+
+using NodeT = svo::contree_node<uint32_t>;

@@ -126,7 +126,7 @@ public:
     inline static float terrain_amp = 2.f;
     inline static float terrain_detail_scale = 2.5f;
     inline static float terrain_detail_amp = 0.025f;
-    inline static float flat_terrain_factor = 0.5f;
+    inline static float flat_terrain_factor = 0.3f;
 
     static glm::vec2 minmax_map(glm::vec3 p, glm::vec3 half_size)
     {

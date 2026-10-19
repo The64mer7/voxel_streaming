@@ -4,6 +4,7 @@
 #include "graphics/camera.hpp"
 #include "graphics/shader.hpp"
 #include "graphics/texture.hpp"
+#include "graphics/timer.hpp"
 #include "graphics/ubo.hpp"
 
 #include "input.hpp"

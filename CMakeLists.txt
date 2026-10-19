@@ -7,6 +7,7 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp" "src/*.h" "src/*.hpp")
 
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS "shaders/*.frag" "shaders/*.vert" "shaders/*.comp")
 file(GLOB_RECURSE RESOURCES_SOURCES CONFIGURE_DEPENDS "resources/*")
+file(GLOB_RECURSE MESHES_SOURCES CONFIGURE_DEPENDS "meshes/*")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,6 +80,7 @@ endif()
 
 set(SHADER_DEST_DIR $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders)
 set(RESOURCES_DEST_DIR $<TARGET_FILE_DIR:${PROJECT_NAME}>/resources)
+set(MESHES_DEST_DIR $<TARGET_FILE_DIR:${PROJECT_NAME}>/meshes)
 
 add_custom_target(update_shaders ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_DEST_DIR}
@@ -98,8 +100,18 @@ add_custom_target(update_resources ALL
     COMMENT "Checking/Copying resources..."
 )
 
+add_custom_target(update_meshes ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${MESHES_DEST_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory 
+            "${CMAKE_CURRENT_SOURCE_DIR}/meshes" 
+            ${MESHES_DEST_DIR}
+    SOURCES ${MESHES_SOURCES}
+    COMMENT "Checking/Copying meshes..."
+)
+
 add_dependencies(${PROJECT_NAME} update_shaders)
 add_dependencies(${PROJECT_NAME} update_resources)
+add_dependencies(${PROJECT_NAME} update_meshes)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     src

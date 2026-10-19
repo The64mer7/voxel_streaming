@@ -1,0 +1,127 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) buffer PerPixelBuffer
+{
+    uint num_data;
+    uint data[];
+} texel_metadata;
+
+layout(std430, binding = 1) buffer IndirectCmd
+{
+    uint groups_x;
+    uint groups_y;
+    uint groups_z;
+} cmd;
+
+uniform usampler2D u_tex_requests0;
+uniform usampler2D u_tex_requests1;
+uniform usampler2D u_tex_requests2;
+
+uvec4 sample_request_block(ivec2 c, int block_index)
+{
+    if (block_index == 0)
+        return texelFetch(u_tex_requests0, c, 0);
+    if (block_index == 1)
+        return texelFetch(u_tex_requests1, c, 0);
+    return texelFetch(u_tex_requests2, c, 0);
+}
+
+void fill_bitmask(inout uint bitmask, uvec4 blocks[3], ivec2 cmp_coords)
+{
+    uvec4 cmp_blocks[3];
+
+    for (int i = 0; i < 3; i++)
+    {
+        cmp_blocks[i] = sample_request_block(cmp_coords, i);
+    }
+
+    for (int i = 0; i < 12; i++)
+    {
+        uint block_idx = i/4;
+        uint elem_idx = i%4;
+        uint curr_elem = blocks[block_idx][elem_idx];
+
+        for (int j = -1; j <= 1; j++)
+        {
+            uint elem_i = (i+j+12) % 12;
+            uint cmp_block_idx = elem_i / 4;
+            uint cmp_elem_idx = elem_i % 4;
+            uint cmp_elem = cmp_blocks[cmp_block_idx][cmp_elem_idx];
+            
+            uint has_duplicate_bit = uint(curr_elem == cmp_elem);
+            bitmask |= (has_duplicate_bit << i);
+        }
+    }
+}
+
+shared uint s_bitmasks[16*16];
+shared uint s_num_bitmasks;
+shared uint s_base_idx;
+
+void main()
+{
+    if (gl_LocalInvocationIndex == 0)
+        s_num_bitmasks = 0;
+    barrier();
+
+    ivec2 c00 = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 img_size = textureSize(u_tex_requests0, 0);
+    bool active_thread = all(lessThan(c00, img_size));
+    uint bitmask = 0u;
+    
+    if (active_thread)
+    {
+        uvec4 blocks[3];
+        for (int i = 0; i < 3; i++)
+            blocks[i] = sample_request_block(c00, i);
+
+
+        ivec2 c01 = ivec2(gl_GlobalInvocationID.xy) + ivec2(0, 2);
+        ivec2 c10 = ivec2(gl_GlobalInvocationID.xy) + ivec2(2, 0);
+        ivec2 c11 = ivec2(gl_GlobalInvocationID.xy) + ivec2(2, 2);
+
+        if (c01.y < img_size.y) 
+            fill_bitmask(bitmask, blocks, c01);
+
+        if (c10.x < img_size.x) 
+            fill_bitmask(bitmask, blocks, c10);
+
+        if (c11.x < img_size.x && c11.y < img_size.y) 
+            fill_bitmask(bitmask, blocks, c11);
+
+        bitmask = (~bitmask) & ((1u << 12u) - 1);
+    }
+    uint packed_coords =
+    ((uint(c00.x) & 0x3ffu) << 12u) |
+    ((uint(c00.y) & 0x3ffu) << 22u);
+
+    if (active_thread)
+    {
+        if (bitmask != 0)
+        {
+            uint write_idx = atomicAdd(s_num_bitmasks, 1);
+            if (write_idx < 256)
+            {
+                s_bitmasks[write_idx] = (bitmask | packed_coords);
+            }
+        }
+    }
+        barrier();
+        if (gl_LocalInvocationIndex == 0)
+        {
+            s_base_idx = atomicAdd(texel_metadata.num_data, s_num_bitmasks);
+        }
+        barrier();
+        if (gl_LocalInvocationIndex < s_num_bitmasks)
+        {
+            texel_metadata.data[s_base_idx + gl_LocalInvocationIndex] = s_bitmasks[gl_LocalInvocationIndex];
+        }
+        if (gl_LocalInvocationIndex == 0)
+        {
+            cmd.groups_x = max(cmd.groups_x, (texel_metadata.num_data + 15) / 16); // FIX: CRUDE
+            cmd.groups_y = 1;
+            cmd.groups_z = 1;
+        }
+}

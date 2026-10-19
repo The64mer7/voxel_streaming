@@ -1,0 +1,76 @@
+#version 450 core
+
+layout(local_size_x = 16) in;
+
+layout(std430, binding = 0) buffer PerPixelBuffer
+{
+    uint num_data;
+    uint data[];
+} texel_metadata;
+
+layout(std430, binding = 1) buffer OutCompactBuffer
+{
+    uint num_nodes;
+    uint nodes[];
+};
+
+uniform usampler2D u_tex_requests0;
+uniform usampler2D u_tex_requests1;
+uniform usampler2D u_tex_requests2;
+
+shared uint s_node_offsets[16];
+shared uint s_base_idx;
+
+uvec4 sample_request_block(ivec2 c, int block_index)
+{
+    if (block_index == 0)
+        return texelFetch(u_tex_requests0, c, 0);
+    if (block_index == 1)
+        return texelFetch(u_tex_requests1, c, 0);
+    return texelFetch(u_tex_requests2, c, 0);
+}
+
+void main()
+{
+    uint local_idx = gl_LocalInvocationIndex;
+    bool active_thread = gl_GlobalInvocationID.x < texel_metadata.num_data;
+    uint mask = 0u;
+    uvec4 blocks[3];
+    if (active_thread)
+    {
+        uint packed_metadata = texel_metadata.data[gl_GlobalInvocationID.x];
+        uint x = (packed_metadata >> 12) & 0x3ffu;
+        uint y = (packed_metadata >> 22) & 0x3ffu;
+        mask = packed_metadata & 0xfffu;
+
+        for(int i = 0; i < 3; i++)
+            blocks[i] = sample_request_block(ivec2(x,y), i);
+    }
+
+    uint node_count = bitCount(mask);
+    s_node_offsets[local_idx] = node_count;
+    barrier();
+
+    for (uint offset = 1; offset < gl_WorkGroupSize.x; offset <<= 1)
+    {
+        uint preceding_count = local_idx >= offset ? s_node_offsets[local_idx - offset] : 0u;
+        barrier();
+        s_node_offsets[local_idx] += preceding_count;
+        barrier();
+    }
+
+    if (local_idx == 0)
+        s_base_idx = atomicAdd(num_nodes, s_node_offsets[gl_WorkGroupSize.x - 1]);
+    barrier();
+
+    uint output_offset = s_node_offsets[local_idx] - node_count;
+    while (mask != 0u)
+    {
+        uint bit_index = findLSB(mask);
+        uint block_idx = bit_index / 4u;
+        uint elem_idx = bit_index % 4u;
+        nodes[s_base_idx + output_offset] = blocks[block_idx][elem_idx];
+        output_offset++;
+        mask &= mask - 1u;
+    }
+}

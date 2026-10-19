@@ -10,6 +10,15 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include "graphics/buffer.hpp"
+
+struct DispatchIndirectCommand
+{
+    uint32_t num_groups_x;
+    uint32_t num_groups_y;
+    uint32_t num_groups_z;
+};
+
 class Shader
 {
 public:
@@ -102,6 +111,30 @@ public:
     {
         bind();
         glDispatchCompute(group_x, group_y, group_z);
+        glMemoryBarrier(barrier_flags);
+    }
+
+    void dispatch_compute_grid(const glm::uvec3& total_size, const glm::uvec3& group_size,
+                               GLenum barrier_flags)
+    {
+        bind();
+        glm::uvec3 groups = (total_size + group_size - 1u) / group_size;
+        glDispatchCompute(groups.x, groups.y, groups.z);
+        glMemoryBarrier(barrier_flags);
+    }
+
+    void dispatch_compute(const glm::uvec3& groups,
+                          GLenum barrier_flags = GL_SHADER_STORAGE_BARRIER_BIT) const
+    {
+        bind();
+        glDispatchCompute(groups.x, groups.y, groups.z);
+        glMemoryBarrier(barrier_flags);
+    }
+
+    void dispatch_compute_indirect(const Ssbo& ssbo, GLenum barrier_flags)
+    {
+        glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, ssbo.buffer_id);
+        glDispatchComputeIndirect(0);
         glMemoryBarrier(barrier_flags);
     }
 

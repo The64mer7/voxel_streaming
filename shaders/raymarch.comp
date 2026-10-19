@@ -7,14 +7,22 @@
 #define INVALID_OFFSET uint(0xffffffffu)
 #define NORMAL_SIZE (1/1024.f)
 
-
 uniform mat4 u_inv_view;
 uniform mat4 u_inv_proj;
 uniform vec3 u_cam_pos;
+uniform uint u_frame_index;
+uniform float u_chunk_size;
 
-layout(local_size_x = 16, local_size_y = 16) in;
+#define GROUP_SIZE 16
+layout(local_size_x = GROUP_SIZE, local_size_y = GROUP_SIZE) in;
+
 layout(rgba8, binding = 0) uniform image2D u_albedo;
-//layout(r32ui, binding = 1) uniform uimage2D u_requests;
+layout(r16f, binding = 1) uniform image2D u_depth;
+layout(rgba16_snorm, binding = 2) uniform image2D u_normal;
+
+layout(rgba32ui, binding = 3) uniform uimage2D u_img_requests0;
+layout(rgba32ui, binding = 4) uniform uimage2D u_img_requests1;
+layout(rgba32ui, binding = 5) uniform uimage2D u_img_requests2;
 
 layout(std430, binding = 0) buffer ContreeRayLookupTable
 {
@@ -42,6 +50,79 @@ layout(std430, binding = 2) buffer Requests
     uint request_count;
     uint request_buffer[];
 };
+
+layout(std430, binding = 4) buffer PerPixelBuffer
+{
+    uint num_metadata;
+    uint metadata[];
+} texel_metadata;
+
+#define MAX_REQUESTS_PER_THREAD 4
+#define S_REQUEST_CNT (GROUP_SIZE * GROUP_SIZE * MAX_REQUESTS_PER_THREAD)
+shared uint s_base_index;
+shared uint s_requests_counter;
+shared uint s_requests[S_REQUEST_CNT];
+
+ivec2 screen_coords()
+{
+    return ivec2(gl_GlobalInvocationID.xy);
+}
+
+uint request_i = 0;
+uvec4 requests[3] = uvec4[3](uvec4(INVALID_OFFSET),uvec4(INVALID_OFFSET),uvec4(INVALID_OFFSET));
+
+void init_requests()
+{
+    for (int i = 0; i < 3; i++)
+        requests[i] = uvec4(INVALID_OFFSET);
+}
+
+bool request_in_range()
+{
+    int flat_local = ((screen_coords().x % 2) + 2 * (screen_coords().y % 2) + int(u_frame_index%4)) % 4 + int((u_frame_index/4)%2);
+    return request_i / 12 == flat_local;
+}
+
+void request_node_to_temp(uint node_idx)
+{
+    if (!request_in_range())
+    {
+        request_i++;
+        return;
+    }
+        
+    uint img_idx = (request_i % 12) / 4;
+    uint component_idx = request_i % 4;
+
+    requests[img_idx][component_idx] = node_idx;
+
+    request_i++;
+}
+
+void request_nodes_to_img()
+{
+    imageStore(u_img_requests0, screen_coords(), requests[0]);
+    imageStore(u_img_requests1, screen_coords(), requests[1]);
+    imageStore(u_img_requests2, screen_coords(), requests[2]);
+}
+
+bool is_special_ray()
+{
+    uint region_size = 8;
+    ivec2 coords_delta = ivec2(u_frame_index % region_size, (u_frame_index / region_size)%region_size);
+    if (any(greaterThan((screen_coords() - coords_delta)%region_size, ivec2(0))))
+        return false;
+    return true;
+}
+
+void request_node(uint node_idx, uint priority)
+{
+    if (!is_special_ray())
+        return;
+    uint write_idx = atomicAdd(s_requests_counter, 1);
+    if (write_idx < S_REQUEST_CNT)
+        s_requests[write_idx] = node_idx | ((priority & 7u) << 29);
+}
 
 uint total_branches = 0u;
 uint divergent_branches = 0u;
@@ -288,6 +369,7 @@ vec3 pos_along_ray(vec3 ro, vec3 rd, float t)
 
 uint get_child_offset(TreeNode node, uint bit_index)
 {
+    return bit_index;
     uint is_upper_mask = uint(bit_index >= 32u);
     uint bit = bit_index & 31u;
     uint lower_bits = (1u << bit) - 1u;
@@ -334,6 +416,25 @@ bool coord_in_bounds_lod(ivec3 c, uint depth, uint axis_branching_factor)
     return all(lessThan(uvec3(c), uvec3(max_c)));
 }
 
+//uint l_requests_count = 0;
+//uint l_descend_count = 0;
+//
+//void try_request(uint node_idx, uint depth)
+//{
+//    if (l_requests_count < MAX_REQUESTS_PER_THREAD)
+//        return;
+//    uint minimum = MAX_REQUESTS_PER_THREAD * (u_frame_index % 32);
+//    uint maximum = minimum + MAX_REQUESTS_PER_THREAD;
+//    if (l_descend_count >= minimum && l_descend_count < maximum)
+//    {
+//        uint priority = 7 - depth;
+//        request_node(node_idx, priority);
+//        l_requests_count++;
+//    }
+//}
+
+uint descend_cnt = 0;
+
 void descend(vec3 p, inout TraversalState state, vec3 ro, vec3 rd, vec3 ird, vec3 srd, vec3 pos_rd, int axis_branching_factor)
 {
     while (true)
@@ -359,8 +460,14 @@ void descend(vec3 p, inout TraversalState state, vec3 ro, vec3 rd, vec3 ird, vec
             {
                 break;
             }
-                state.node_idx = child_idx;
-                state.depth++;
+            state.node_idx = child_idx;
+            state.depth++;
+
+
+            descend_cnt++;
+            request_node_to_temp(child_idx);
+            //try_request(state.node_idx, state.depth);
+            //l_descend_count++;
         }
         else
             break;
@@ -434,6 +541,7 @@ uint traverse_forward(inout raymarch_hit hit, TreeNode node, inout TraversalStat
         IF(contains_child(node, bit_index))
         {
             uint child_idx = get_child_ptr(node, bit_index);
+            request_node_to_temp(child_idx);
             IF(!(is_leaf_node(nodes.node_buffer[child_idx]) && nodes.node_buffer[child_idx].data == 0))
             {
                 state.coord = next_coord;
@@ -496,6 +604,7 @@ raymarch_hit raymarch_tree(float tree_size, vec3 ro, vec3 rd) // fix: issue with
     for (int i = 0; i < MAX_ITERATIONS; i++)
     {
         TreeNode node = nodes.node_buffer[state.node_idx];
+        hit.iteration_count++;
         
         IF(!is_leaf_node(node))
         {
@@ -533,20 +642,24 @@ raymarch_hit raymarch_tree(float tree_size, vec3 ro, vec3 rd) // fix: issue with
 
         IF(state.node_idx == INVALID_OFFSET)
             break;
-        hit.iteration_count++;
     }
 
     return hit;
 }
 
-ivec2 screen_coords()
-{
-    return ivec2(gl_GlobalInvocationID.xy);
-}
-
 void write_albedo(vec3 color)
 {
     imageStore(u_albedo, screen_coords(), vec4(color, 1.0f));
+}
+
+void write_depth(float depth)
+{
+    imageStore(u_depth, screen_coords(), vec4(depth, 0, 0, 0));
+}
+
+void write_normal(vec4 normal)
+{
+    imageStore(u_normal, screen_coords(), normal);
 }
 
 //void write_request(uint request_node)
@@ -569,18 +682,58 @@ void create_ray(out vec3 ro, out vec3 rd)
     rd = normalize(world_pos.xyz - ro);
 }
 
-#define S_REQUEST_CNT (16*16)
-shared uint s_base_index;
-shared uint s_requests_counter;
-shared uint s_requests[S_REQUEST_CNT];
+#define COLOR_OFFSET 0
+#define COLOR_BITS 12
+#define COLOR_MASK ((1 << COLOR_BITS) - 1)
+
+#define NORMAL_OFFSET 12
+#define NORMAL_BITS 12
+
+vec3 unpack_color(uint data)
+{
+    data &= ((1 << COLOR_BITS) - 1);
+    vec3 c;
+    c.r = ((data >> 0) & 0xfu) / float(0xfu);
+    c.g = ((data >> 4) & 0xfu) / float(0xfu);
+    c.b = ((data >> 8) & 0xfu) / float(0xfu);
+    return c;
+
+    return vec3
+    (
+        (data * 195111 + 1499191) % 255,
+        (data * 578827 + 7827876) % 255,
+        (data * 687786 + 2576785) % 255
+    )/255.f;
+}
 
 vec3 hash_u1f3(uint v)
 {
     vec3 c;
-    c.x = v * 145195 + 19519521;
-    c.y = v * 156582 + 51215621;
-    c.z = v * 495266 + 15462165;
+    c.x = v * 14519518 + 19519521;
+    c.y = v * 1565851562 + 512156251;
+    c.z = v * 495266251 + 154621665;
     return fract(c / 256.f);
+}
+
+vec3 unpack_normal(uint packed_normal)
+{
+    uint quantized_bits = 4;
+    uint max_val = (1 << quantized_bits) - 1;
+
+    uvec3 quantized;
+    quantized.x = packed_normal & max_val;
+    quantized.y = (packed_normal >> quantized_bits) & max_val;
+    quantized.z = (packed_normal >> (2 * quantized_bits)) & max_val;
+
+    vec3 normal = vec3(quantized) / float(max_val);
+    normal = normal * 2.0f - 1.0f;
+
+    return normalize(normal);
+}
+
+vec3 get_normal(uint data)
+{
+    return unpack_normal((data >> NORMAL_OFFSET) & ((1 << NORMAL_BITS) - 1));
 }
 
 ivec4 coord_of_node(uint node_idx)
@@ -644,6 +797,14 @@ ivec4 coord_of_node(uint node_idx)
     return coord;
 }
 
+float projected_voxel_size(float depth, float voxel_size)
+{
+    float focal_length = 1 / u_inv_proj[1][1];
+    float voxel_half_size = voxel_size * 0.5f;
+    float projected = voxel_half_size * focal_length / depth;
+    return projected;
+}
+
 uint get_expected_lod(float dist)
 {
     float radius = 64.f;
@@ -655,6 +816,10 @@ uint get_expected_lod(float dist)
 
 void main()
 {
+    ivec2 img_size = ivec2(imageSize(u_albedo));
+    if (any(greaterThanEqual(screen_coords(), img_size)))
+        return;
+
     uint thread_idx = gl_LocalInvocationIndex;
     if (thread_idx == 0)
         s_requests_counter = 0;
@@ -663,25 +828,28 @@ void main()
     vec3 ro;
     vec3 rd;
     create_ray(ro, rd);
-    raymarch_hit hit = raymarch_tree(64.f, ro, rd);
+    raymarch_hit hit = raymarch_tree(u_chunk_size, ro, rd);
+    
+    vec3 albedo = vec3(0.f);
+    vec3 normal = vec3(0.f);
     if (hit.t >= -0.5f)
     {
-        write_albedo(hash_u1f3(hit.node_idx));
-        ivec4 coord = coord_of_node(hit.node_idx);
-        //write_albedo(vec3(coord.xyz) / pow(4.f, coord.w));
-        //write_albedo(hash_u1f3(get_expected_lod(hit.t)));
+        albedo = unpack_color(hit.data);
+        normal = get_normal(hit.data);
     }
-    else
-        write_albedo(vec3(0.4f));
-
-    if (hit.t >= -0.5f)
-    {
-        uint write_idx = atomicAdd(s_requests_counter, 1);
-        if (write_idx < S_REQUEST_CNT)
-            s_requests[write_idx] = hit.node_idx;
-    }
+    
+    //write_albedo(vec3(hit.iteration_count / float(MAX_ITERATIONS)));
+    write_albedo(albedo);
+    write_depth(hit.t);
+    write_normal(vec4(normal, 1.f));
 
     barrier();
+    if (hit.t >= -0.5f)
+    {
+        request_node(hit.node_idx, 7u - hit.depth);
+        request_node_to_temp(hit.node_idx);
+    }
+    request_nodes_to_img();
     if (thread_idx == 0 && s_requests_counter > 0)
     {
         uint old_count = atomicAdd(request_count, s_requests_counter);
@@ -691,7 +859,6 @@ void main()
         }
         else 
         {
-
             atomicAdd(request_count, -s_requests_counter);
             s_base_index = INVALID_OFFSET;
         }

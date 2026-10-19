@@ -53,16 +53,35 @@ public:
     {
         if (buffer_id == 0)
         {
-            glCreateBuffers(1, &buffer_id); // DSA creation
+            glCreateBuffers(1, &buffer_id);
         }
         size_in_bytes = size;
         glNamedBufferStorage(buffer_id, static_cast<GLsizeiptr>(size), data, flags);
+    }
+
+    template <typename T>
+    void callocate(const void* data, size_t count, GLbitfield flags = GL_DYNAMIC_STORAGE_BIT)
+    {
+        if (buffer_id == 0)
+        {
+            glCreateBuffers(1, &buffer_id);
+        }
+        size_in_bytes = count * sizeof(T);
+        glNamedBufferStorage(buffer_id, static_cast<GLsizeiptr>(size_in_bytes), data, flags);
     }
 
     void set_sub_data(const void* data, size_t size, size_t offset = 0) const
     {
         glNamedBufferSubData(buffer_id, static_cast<GLintptr>(offset),
                              static_cast<GLsizeiptr>(size), data);
+    }
+
+    void clear(GLubyte data) const
+    {
+        if (buffer_id != 0 && size_in_bytes > 0)
+        {
+            glClearNamedBufferData(buffer_id, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE, &data);
+        }
     }
 
     void bind_base(unsigned int binding_index) const

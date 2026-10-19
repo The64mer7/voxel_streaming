@@ -1,0 +1,183 @@
+#version 460 core 
+layout(local_size_x = 16, local_size_y = 16) in;
+
+struct Probe
+{
+    vec3 indirect;
+};
+
+layout(std430, binding = 0) buffer IrradianceProbes
+{
+    Probe probes[];
+} probes;
+
+
+layout(rgba8, binding = 0) uniform image2D u_albedo;
+layout(r16f, binding = 1) uniform image2D u_depth;
+layout(rgba16_snorm, binding = 2) uniform image2D u_normal;
+
+layout(rgba8, binding = 3) uniform image2D u_final;
+
+uniform uint u_display_texture;
+uniform vec3 u_cam_pos;
+uniform mat4 u_inv_proj;
+uniform mat4 u_inv_view;
+uniform float u_brightness;
+
+ivec2 screen_coords()
+{
+    return ivec2(gl_GlobalInvocationID.xy);
+}
+
+void create_ray(ivec2 uvi, out vec3 ro, out vec3 rd)
+{
+    ivec2 img_size = imageSize(u_albedo);
+
+    vec2 ndc = (vec2(uvi) + 0.5f) / vec2(img_size) * 2.0f - 1.0f;
+    float aspect = float(img_size.x) / float(img_size.y);
+    
+    vec4 clip = u_inv_proj * vec4(ndc, -1.0f, 1.0f);
+    clip /= clip.w;
+    vec4 world_pos = u_inv_view * clip;
+
+    ro = u_cam_pos;
+    rd = normalize(world_pos.xyz - ro);
+}
+
+#define DISPLAY_FINAL 0
+#define DISPLAY_ALBEDO 1
+#define DISPLAY_DEPTH 2
+#define DISPLAY_NORMAL 3
+#define DISPLAY_INDIRECT 4
+
+vec3 trilinear_interpolate(
+    vec3 c000, vec3 c100, vec3 c010, vec3 c110,
+    vec3 c001, vec3 c101, vec3 c011, vec3 c111,
+    vec3 f
+)
+{
+    vec3 x00 = mix(c000, c100, f.x);
+    vec3 x10 = mix(c010, c110, f.x);
+    vec3 x01 = mix(c001, c101, f.x);
+    vec3 x11 = mix(c011, c111, f.x);
+
+    vec3 y0 = mix(x00, x10, f.y);
+    vec3 y1 = mix(x01, x11, f.y);
+
+    return mix(y0, y1, f.z);
+}
+
+vec3 trilinear_interpolate(
+    vec3 c[8],
+    vec3 f
+)
+{
+    vec3 x00 = mix(c[0], c[1], f.x);
+    vec3 x10 = mix(c[2], c[3], f.x);
+    vec3 x01 = mix(c[4], c[5], f.x);
+    vec3 x11 = mix(c[6], c[7], f.x);
+
+    vec3 y0 = mix(x00, x10, f.y);
+    vec3 y1 = mix(x01, x11, f.y);
+
+    return mix(y0, y1, f.z);
+}
+
+uint flatten_index(ivec3 c, int axis_branching_factor)
+{
+    return uint(c.x + c.y * axis_branching_factor + c.z * axis_branching_factor * axis_branching_factor);
+}
+
+ivec3 coord_from_world(vec3 wp, float size) 
+{ 
+    return ivec3(floor(wp / size)); 
+}
+
+vec3 sample_indirect_light(vec3 wp, vec3 normal)
+{
+    uvec3 probe_coord00 = coord_from_world(wp, 4.f);
+    if (all(lessThan(probe_coord00, uvec3(15))))
+    {
+        vec3 probe_colors[8];
+        for (int i = 0; i < 8; i++)
+        {
+            uint probe_i = flatten_index(ivec3(probe_coord00 + ivec3(i % 2, (i / 2) % 2, i/4)), 16);
+            Probe probe = probes.probes[probe_i];
+            probe_colors[i] = probe.indirect;
+        }
+    
+        vec3 indirect_light = trilinear_interpolate(probe_colors, vec3(fract(wp/4.f)));
+        return indirect_light;
+    }
+    return vec3(0.f);
+}
+
+float sample_shadow_factor(vec3 wp)
+{
+    return 1.f;
+}
+
+vec3 sample_direct_light(vec3 wp, vec3 normal)
+{
+    vec3 sun_dir = normalize(vec3(1,-1,1));
+    vec3 sun_color = vec3(200, 182, 150)/255.f;
+    float sun_intensity = 1.f;
+    float n_dot_l = max(dot(normal, -sun_dir), 0.f);
+
+    return sun_intensity * sun_color * n_dot_l * sample_shadow_factor(wp);
+}
+
+vec3 calculate_incoming_light(ivec2 uvi)
+{
+    float voxel_size = 64.f / pow(4.f, 4.f);
+
+    vec3 ro;
+    vec3 rd;
+    create_ray(uvi, ro, rd);
+
+    vec3 normal = imageLoad(u_normal, uvi).xyz;
+    float depth = imageLoad(u_depth, uvi).x;
+    if (depth > -0.5f)
+    {
+        vec3 hit_p = ro + rd * depth;
+        vec3 quantized_hit_p = floor(hit_p / voxel_size) * voxel_size;
+        vec3 incoming_light = sample_indirect_light(quantized_hit_p, normal) + sample_direct_light(quantized_hit_p, normal);
+        return incoming_light;
+    }
+    return vec3(0);
+}
+
+void main()
+{
+    ivec2 uvi = screen_coords();
+
+    if (any(greaterThanEqual(uvi, imageSize(u_final))))
+        return;
+
+    if (u_display_texture == DISPLAY_ALBEDO)
+    {
+        vec4 albedo = imageLoad(u_albedo, uvi);
+        imageStore(u_final, uvi, albedo);
+    }
+    if (u_display_texture == DISPLAY_DEPTH)
+    {
+        vec4 depth = imageLoad(u_depth, uvi);
+        depth.x *= u_brightness;
+        imageStore(u_final, uvi, depth);
+    }
+    if (u_display_texture == DISPLAY_NORMAL)
+    {
+        vec4 normal = imageLoad(u_normal, uvi);
+        imageStore(u_final, uvi, normal);
+    }
+    if (u_display_texture == DISPLAY_INDIRECT)
+    {
+
+    }
+    if (u_display_texture == DISPLAY_FINAL)
+    {
+        vec3 albedo = imageLoad(u_albedo, uvi).rgb;
+        vec3 incoming_light = calculate_incoming_light(uvi);
+        imageStore(u_final, uvi, vec4(albedo * incoming_light, 1.f));
+    }
+}

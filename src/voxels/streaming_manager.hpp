@@ -1,6 +1,7 @@
 #pragma once
 
 #include "allocator/page_allocator.hpp"
+#include "graphics/camera.hpp"
 #include "voxels/builder.hpp"
 #include "voxels/node.hpp"
 
@@ -9,10 +10,46 @@
 #include <mutex>
 #include <vector>
 
-using NodeT = svo::contree_node<uint32_t>;
+static bool is_aabb_in_frustum(const glm::mat4& view_matrix, const glm::mat4& projection_matrix,
+                               const glm::vec3& aabb_origin, float aabb_size)
+{
+    glm::mat4 vp = projection_matrix * view_matrix;
+
+    std::array<glm::vec4, 6> planes;
+
+    planes[0] = vp[3] + vp[0]; // Left
+    planes[1] = vp[3] - vp[0]; // Right
+    planes[2] = vp[3] + vp[1]; // Bottom
+    planes[3] = vp[3] - vp[1]; // Top
+    planes[4] = vp[3] + vp[2]; // Near
+    planes[5] = vp[3] - vp[2]; // Far
+
+    glm::vec3 aabb_max = aabb_origin + glm::vec3(aabb_size);
+
+    for (int i = 0; i < 6; i++)
+    {
+        glm::vec3 normal = glm::vec3(planes[i]);
+        float d = planes[i].w;
+
+        glm::vec3 p;
+        p.x = (normal.x >= 0.0f) ? aabb_max.x : aabb_origin.x;
+        p.y = (normal.y >= 0.0f) ? aabb_max.y : aabb_origin.y;
+        p.z = (normal.z >= 0.0f) ? aabb_max.z : aabb_origin.z;
+
+        if (glm::dot(normal, p) + d < 0.0f)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 class VoxelStreamingManager
 {
 public:
+    FPSCamera* cam;
+    uint32_t retire_age = 32;
     void init(uint32_t num_nodes, uint32_t page_size)
     {
         m_timestamp = 0;
@@ -37,36 +74,70 @@ public:
         m_nodes_ssbo.allocate(m_nodes.data(), sizeof(NodeT) * num_nodes, flags);
     }
     int allocated_pages = 0;
-    void update_lru(uint32_t timestamp, const std::vector<uint32_t>& nodes)
+    void update_lru(uint32_t timestamp, uint32_t* nodes, uint32_t num_nodes)
     {
-        for (uint32_t node : nodes)
+        m_timestamp = timestamp;
+        for (uint32_t i = 0; i < num_nodes; i++)
         {
+            uint32_t node = nodes[i];
             while (node != UINT32_MAX)
             {
-                m_page_lru[page_of_node(node)] = timestamp;
+                reset_age(page_of_node(node));
                 node = m_nodes[node].parent;
             }
         }
+
+        if (true)
+            for (uint32_t i = 0; i < 16; i++)
+            {
+                uint32_t page_id = m_victim_cursor;
+                if (m_page_lru[page_id] == UINT32_MAX) // already cached
+                    continue;
+
+                int32_t age = page_age(page_id);
+                if (age > retire_age)
+                {
+                    unlink_page_and_cache(page_id);
+                    m_victim_cursor = (m_victim_cursor + 1) % m_page_lru.size();
+                }
+                m_victim_cursor = (m_victim_cursor + 1) % m_page_lru.size();
+            }
     }
 
+    // bool can_discard(uint32_t page_id)
+    //{
+    //     if (m_page_parent_index[page_id] == UINT32_MAX)
+    //         return true;
+    //     BuildInfo info = get_build_info(m_page_parent_index[page_id]);
+    //     return !is_aabb_in_frustum(cam->get_view_matrix(), cam->get_projection_matrix(),
+    //                                info.chunk_origin, info.chunk_size);
+    // }
+
     uint32_t page_of_node(uint32_t node) { return node / m_page_size; }
-    void update(uint32_t timestamp) { m_timestamp = timestamp; }
     int32_t page_age(uint32_t page_id)
     {
         return static_cast<int32_t>(m_timestamp) - static_cast<int32_t>(m_page_lru[page_id]);
     }
+    void reset_age(uint32_t page_id) { m_page_lru[page_id] = m_timestamp; }
+
     uint32_t allocate_page()
     {
+        if (!m_free_pages.empty())
+        {
+            uint32_t page_id = m_free_pages.back();
+            m_free_pages.pop_back();
+            reset_age(page_id);
+            return page_id;
+        }
         for (uint32_t i = 0; i < 32; i++)
         {
             uint32_t page_id = m_victim_cursor;
             int32_t age = page_age(page_id);
-            if (age > 32)
+            if (age > retire_age)
             {
+                reset_age(page_id);
                 unlink_page(page_id);
-
                 m_victim_cursor = (m_victim_cursor + 1) % m_page_lru.size();
-                m_page_lru[page_id] = m_timestamp;
 
                 return page_id;
             }
@@ -78,22 +149,23 @@ public:
 
     template <typename PFNCreate, typename PFNHomogeneous>
     void process_subdivision_requests(const GenerateInfo<PFNCreate, PFNHomogeneous>& gen_info,
-                                      uint32_t* node_indices, uint32_t num_node_indices)
+                                      uint32_t* nodes, uint32_t num_nodes)
     {
-        printf("REQ");
         bool should_allocate = true;
         uint32_t page_id = UINT32_MAX;
         uint32_t num_success_requests = 0;
-        for (uint32_t i = 0; i < num_node_indices; i++)
+        for (uint32_t i = 0; i < num_nodes; i++)
         {
-            uint32_t node_idx = node_indices[i];
+            uint32_t node_idx = nodes[i];
+            if (node_idx == UINT32_MAX)
+                continue;
 
             if (m_nodes[node_idx].child_count() > 0)
                 continue;
 
             BuildInfo build_info = get_build_info(node_idx);
 
-            if (build_info.depth >= 4)
+            if (build_info.depth >= 5)
                 continue;
 
             if (should_allocate)
@@ -119,7 +191,6 @@ public:
         }
 
         upload_to_gpu();
-        printf("UESTS\n");
     }
 
     void bind_buffer(uint32_t nodes_bind_idx) { m_nodes_ssbo.bind_base(nodes_bind_idx); }
@@ -166,15 +237,20 @@ public:
 
     void upload_to_gpu()
     {
-        m_nodes_ssbo.set_sub_data(m_nodes.data(), m_nodes.size() * sizeof(NodeT), 0);
+        if (1)
+            m_nodes_ssbo.set_sub_data(WorldContree::s_nodes.data(),
+                                      WorldContree::s_nodes.size() * sizeof(NodeT), 0);
+        else
+            m_nodes_ssbo.set_sub_data(m_nodes.data(), m_nodes.size() * sizeof(NodeT), 0);
     }
 
-    BuildInfo get_build_info(uint32_t node_idx)
+    BuildInfo get_build_info(uint32_t node_idx, float chunk_size = 128.f)
     {
         BuildInfo info;
 
         glm::ivec4 coord = coord_of_node(node_idx);
-        info.chunk_size = 64.f / glm::pow(4.f, coord.w);
+        info.coord = coord;
+        info.chunk_size = chunk_size / glm::pow(4.f, coord.w);
         info.chunk_origin = glm::vec3(coord) * info.chunk_size;
         info.depth = coord.w;
 
@@ -184,27 +260,61 @@ public:
     void unlink_page(uint32_t page_id)
     {
         uint32_t parent_node = m_page_parent_index[page_id];
-        if (parent_node != NodeT::invalid_offset)
+        if (parent_node == UINT32_MAX)
+            return;
+
+        uint32_t start = page_id * m_page_size;
+        uint32_t end = std::min(start + m_page_size, (uint32_t)m_nodes.size());
+
+        for (uint32_t i = start; i < end; i++)
+            if (m_nodes[i].firstchild != NodeT::invalid_offset)
+                unlink_page(page_of_node(m_nodes[i].firstchild));
+
+        if (m_nodes[parent_node].firstchild == start)
         {
-            allocated_pages--;
             m_nodes[parent_node].childmask.clear();
             m_nodes[parent_node].firstchild = NodeT::invalid_offset;
-
-            uint32_t start_node_idx = page_id * m_page_size;
-            uint32_t end_node_idx = std::min(start_node_idx + m_page_size,
-                                             static_cast<uint32_t>(m_nodes.size()));
-
-            for (uint32_t i = start_node_idx; i < end_node_idx; i++)
-            {
-
-                m_nodes[i].parent = UINT32_MAX;
-                m_nodes[i].firstchild = NodeT::invalid_offset;
-                m_nodes[i].childmask.clear();
-            }
-
-            m_page_parent_index[page_id] = UINT32_MAX;
         }
+        for (uint32_t i = start; i < end; i++)
+        {
+            m_nodes[i].parent = UINT32_MAX;
+            m_nodes[i].firstchild = NodeT::invalid_offset;
+            m_nodes[i].childmask.clear();
+        }
+        m_page_parent_index[page_id] = UINT32_MAX;
+        allocated_pages--;
     }
+
+    void unlink_page_and_cache(uint32_t page_id)
+    {
+        uint32_t parent_node = m_page_parent_index[page_id];
+        if (parent_node == UINT32_MAX)
+            return;
+
+        uint32_t start = page_id * m_page_size;
+        uint32_t end = std::min(start + m_page_size, (uint32_t)m_nodes.size());
+
+        for (uint32_t i = start; i < end; i++)
+            if (m_nodes[i].firstchild != NodeT::invalid_offset)
+                unlink_page(page_of_node(m_nodes[i].firstchild));
+
+        if (m_nodes[parent_node].firstchild == start)
+        {
+            m_nodes[parent_node].childmask.clear();
+            m_nodes[parent_node].firstchild = NodeT::invalid_offset;
+        }
+        for (uint32_t i = start; i < end; i++)
+        {
+            m_nodes[i].parent = UINT32_MAX;
+            m_nodes[i].firstchild = NodeT::invalid_offset;
+            m_nodes[i].childmask.clear();
+        }
+        m_page_lru[page_id] = UINT32_MAX;
+        m_page_parent_index[page_id] = UINT32_MAX;
+        m_free_pages.push_back(page_id);
+        allocated_pages--;
+    }
+
     uint32_t m_timestamp = 0;
     uint32_t m_page_size;
 
@@ -213,6 +323,7 @@ public:
 
     std::vector<uint32_t> m_page_lru;
     std::vector<uint32_t> m_page_parent_index;
+    std::vector<uint32_t> m_free_pages;
 
     std::vector<NodeT> m_nodes;
 
