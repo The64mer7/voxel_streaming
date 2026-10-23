@@ -33,6 +33,11 @@ extern "C"
         };
     };
 
+    ame_vec3 ame_vec3_add(ame_vec3* a, ame_vec3* b);
+    ame_vec3 ame_vec3_sub(ame_vec3* a, ame_vec3* b);
+    ame_vec3 ame_vec3_mul(ame_vec3* a, ame_vec3* b);
+    ame_vec3 ame_vec3_div(ame_vec3* a, ame_vec3* b);
+
     struct ame_bvh_aabb
     {
         ame_vec3 min, max;
@@ -83,6 +88,15 @@ extern "C"
     bool ame_create_bvh(ame_bvh* bvh, const ame_mesh* mesh, uint32_t max_triangles_per_leaf);
     void ame_destroy_bvh(const ame_bvh* bvh);
 
+    bool ame_is_leaf(const ame_bvh_node* node);
+    void ame_set_leaf(ame_bvh_node* node);
+
+    void ame_reset_leaf(ame_bvh_node* node);
+
+    uint32_t ame_bvh_leaf_begin(const ame_bvh_node* node);
+
+    uint32_t ame_bvh_leaf_end(const ame_bvh_node* node);
+
 #ifdef __cplusplus
 }
 #endif
@@ -95,6 +109,42 @@ extern "C"
 extern "C"
 {
 #endif
+
+    ame_vec3 ame_vec3_add(ame_vec3* a, ame_vec3* b)
+    {
+        ame_vec3 c;
+        c.x = a->x + b->x;
+        c.y = a->y + b->y;
+        c.z = a->z + b->z;
+        return c;
+    }
+
+    ame_vec3 ame_vec3_sub(ame_vec3* a, ame_vec3* b)
+    {
+        ame_vec3 c;
+        c.x = a->x - b->x;
+        c.y = a->y - b->y;
+        c.z = a->z - b->z;
+        return c;
+    }
+
+    ame_vec3 ame_vec3_mul(ame_vec3* a, ame_vec3* b)
+    {
+        ame_vec3 c;
+        c.x = a->x * b->x;
+        c.y = a->y * b->y;
+        c.z = a->z * b->z;
+        return c;
+    }
+
+    ame_vec3 ame_vec3_div(ame_vec3* a, ame_vec3* b)
+    {
+        ame_vec3 c;
+        c.x = a->x / b->x;
+        c.y = a->y / b->y;
+        c.z = a->z / b->z;
+        return c;
+    }
 
     bool ame_is_leaf(const ame_bvh_node* node) { return (node->node.left & 0x80000000u) != 0; }
 

@@ -151,6 +151,8 @@ public:
     void process_subdivision_requests(const GenerateInfo<PFNCreate, PFNHomogeneous>& gen_info,
                                       uint32_t* nodes, uint32_t num_nodes)
     {
+        uint32_t min_page = m_page_lru.size();
+        uint32_t max_page = 0;
         bool should_allocate = true;
         uint32_t page_id = UINT32_MAX;
         uint32_t num_success_requests = 0;
@@ -167,10 +169,13 @@ public:
 
             if (build_info.depth >= 5)
                 continue;
-
+            min_page = glm::min(min_page, page_of_node(node_idx));
+            max_page = glm::max(max_page, page_of_node(node_idx));
             if (should_allocate)
             {
                 page_id = allocate_page();
+                min_page = glm::min(min_page, page_id);
+                max_page = glm::max(max_page, page_id);
                 if (page_id == UINT32_MAX)
                 {
                     should_allocate = true;
@@ -189,8 +194,8 @@ public:
                 allocated_pages++;
             }
         }
-
-        upload_to_gpu();
+        printf("page %u - %u \n", min_page, max_page);
+        upload_to_gpu(min_page * m_page_size, max_page * m_page_size + m_page_size);
     }
 
     void bind_buffer(uint32_t nodes_bind_idx) { m_nodes_ssbo.bind_base(nodes_bind_idx); }
@@ -235,13 +240,31 @@ public:
         return coord;
     }
 
+    inline static constexpr bool use_world_nodes = true;
     void upload_to_gpu()
     {
-        if (1)
-            m_nodes_ssbo.set_sub_data(WorldContree::s_nodes.data(),
-                                      WorldContree::s_nodes.size() * sizeof(NodeT), 0);
+        if (use_world_nodes)
+            m_nodes_ssbo.set_sub_data(
+                WorldContree::s_nodes.data(),
+                glm::min(WorldContree::s_nodes.size(), m_nodes.size()) * sizeof(NodeT), 0);
         else
             m_nodes_ssbo.set_sub_data(m_nodes.data(), m_nodes.size() * sizeof(NodeT), 0);
+    }
+
+    void upload_to_gpu(uint32_t begin, uint32_t end)
+    {
+        if (end < begin)
+            return;
+        if (use_world_nodes)
+        {
+            m_nodes_ssbo.set_sub_data(WorldContree::s_nodes.data() + begin,
+                                      (end - begin) * sizeof(NodeT), begin * sizeof(NodeT));
+        }
+        else
+        {
+            m_nodes_ssbo.set_sub_data(m_nodes.data() + begin, (end - begin) * sizeof(NodeT),
+                                      begin * sizeof(NodeT));
+        }
     }
 
     BuildInfo get_build_info(uint32_t node_idx, float chunk_size = 128.f)

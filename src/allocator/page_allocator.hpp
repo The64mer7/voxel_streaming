@@ -25,6 +25,7 @@ public:
         return UINT32_MAX;
     }
     void free_page(uint32_t page) { m_freelist.push(page); }
+    uint32_t free_pages_count() { return (m_max_num_pages - m_next_page) + m_freelist.size(); }
 
 private:
     uint32_t m_next_page = 0;

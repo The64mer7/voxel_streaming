@@ -12,6 +12,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
+#include <bitset>
 #include <format>
 #include <iostream>
 #include <set>
@@ -25,6 +26,27 @@
 #include "voxels/streaming_manager.hpp"
 
 static glm::vec2 imgui_to_glm_vec2(const ImVec2& v) { return glm::vec2{v.x, v.y}; }
+
+inline void debug_print_tree(NodeT* nodes, uint32_t idx = 0, uint32_t depth = 0)
+{
+    auto& node = nodes[idx];
+    uint64_t combined_mask = static_cast<uint64_t>(node.childmask.mask[0]) |
+                             (static_cast<uint64_t>(node.childmask.mask[1]) << 32);
+
+    std::bitset<64> mask_bits(combined_mask);
+    std::string separator = "        ";
+    separator[depth] = '\0';
+    ImGui::Text("%sNode [%d] | data: %u | parent: %u | firstchild: %u | mask: %s",
+                separator.c_str(), idx, node.data, node.parent, node.firstchild,
+                mask_bits.to_string().c_str());
+
+    if (node.firstchild != UINT32_MAX)
+        for (int i = 0; i < 64; i++)
+        {
+            if (node.get_bit(i))
+                debug_print_tree(nodes, node.firstchild + i, depth + 1);
+        }
+}
 
 class Application
 {
@@ -47,7 +69,7 @@ public:
 
     void start()
     {
-        constexpr uint32_t num_nodes = 1u << 25u;
+        constexpr uint32_t num_nodes = 1024 * 1024 * 128;
         streaming_manager.init(num_nodes, 64);
         streaming_manager.cam = &camera;
         if (!sp_raymarch.load_compute("shaders/raymarch.comp"))
@@ -56,6 +78,11 @@ public:
             exit(1);
         if (!sp_aabb.load_graphics("shaders/aabb.vert", "shaders/aabb.frag"))
             exit(1);
+        if (!sp_probes_debug.load_graphics("shaders/probe_debug.vert", "shaders/probe_debug.frag"))
+            exit(1);
+        if (!sp_probes_debug_ray.load_graphics("shaders/probe_debug_ray.vert",
+                                               "shaders/probe_debug_ray.frag"))
+            exit(1);
         if (!sp_request_bitmask_gen.load_compute("shaders/request_bitmask_gen.comp"))
             exit(1);
         if (!sp_compact_requests.load_compute("shaders/compact_requests_fix.comp"))
@@ -63,13 +90,16 @@ public:
         if (!sp_composite.load_compute("shaders/composite.comp"))
             exit(1);
 
-        uint32_t w = 500;
-        uint32_t h = 300;
+        uint32_t w = 800;
+        uint32_t h = 600;
         albedo_texture.create(GL_RGBA8);
         albedo_texture.allocate(w, h);
 
         final_texture.create(GL_RGBA8);
         final_texture.allocate(w, h);
+
+        debug_texture.create(GL_RGBA16F);
+        debug_texture.allocate(w, h);
 
         depth_texture.create(GL_R16F);
         depth_texture.allocate(w, h);
@@ -132,8 +162,25 @@ public:
 
         setup_camera();
 
-        MeshContree::create("meshes/penguin.obj");
-        WorldContree::create_3d_dfs(glm::vec3(0.f), chunk_size, 4);
+        // MeshContree::create("meshes/sponza/sponza.obj");
+        MeshContree::create("meshes/satellite/satellite.obj");
+
+        auto root_aabb = MeshContree::get_bvh().nodes[0].aabb;
+        ame_vec3 bvh_size = ame_vec3_sub(&root_aabb.max, &root_aabb.min);
+
+        glm::vec3 bvh_origin = glm::make_vec3(&root_aabb.min.x);
+        float max_size = glm::max(bvh_size.x, glm::max(bvh_size.y, bvh_size.z));
+        // WorldContree::create_3d_dfs_mesh(bvh_origin, max_size, 4, MeshContree::get_bvh());
+        //   WorldContree::create_3d_dfs(glm::vec3(0), chunk_size, 4);
+
+        WorldContree::s_nodes.resize(1024 * 1024 * 128);
+        WorldContree::s_allocator.create(WorldContree::s_nodes.size() / 64, 64);
+        std::vector<uint32_t> pages;
+        printf("voxelize...\n");
+        create_3d_dfs_fixed_page(&WorldContree::s_allocator, 0, WorldContree::s_nodes.data(),
+                                 MeshContree::create3d, MeshContree::homogeneous3d, bvh_origin,
+                                 max_size, 3, pages);
+        printf("done\n");
         streaming_manager.upload_to_gpu();
     }
     glm::uvec4 data[3] = {glm::uvec4(UINT32_MAX), glm::uvec4(UINT32_MAX), glm::uvec4(UINT32_MAX)};
@@ -178,8 +225,8 @@ public:
                 unique_requests.erase(std::prev(unique_requests.end()));
                 compact_requests.push_back(request_val & 0x1fffffffu);
             }
-            // printf("requests after compaction %u (from %u)\n", compact_requests.size(),
-            //        request_nodes.size());
+            printf("requests after compaction %u (from %u)\n", compact_requests.size(),
+                   request_nodes.size());
 
             streaming_manager.update_lru(frame_index, compact_requests.data(),
                                          compact_requests.size());
@@ -263,9 +310,12 @@ public:
         stream = false;
     }
 
+    std::vector<std::string> profiling_names;
+    std::vector<uint64_t> profiling_times;
+    std::vector<uint32_t> profiling_depths;
+
     void tick(float dt)
     {
-        // printf("frame %u\n", frame_index);
         handle_input(dt);
 
         uint32_t slot = frame_index % 2;
@@ -276,7 +326,7 @@ public:
             glDeleteSync(fences[slot]);
             fences[slot] = nullptr;
 
-            old_stream(slot);
+            // old_stream(slot);
             // stream_nodes();
         }
 
@@ -284,14 +334,15 @@ public:
 
         sp_irradiance_raymarch.set_uint("u_frame_index", frame_index);
         sp_irradiance_raymarch.set_float("u_chunk_size", chunk_size);
+        sp_irradiance_raymarch.set_float("u_probe_spacing", probe_spacing);
 
         streaming_manager.bind_buffer(0);
         probes.bind_base(1);
 
-        gpu_timer.begin(0);
+        profiling_timer.begin_gpu("global_illumination_ray");
         sp_irradiance_raymarch.dispatch_compute(
             glm::uvec3(2, 2, 2), GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
-        gpu_timer.end(0);
+        profiling_timer.end_gpu("global_illumination_ray");
 
         sp_raymarch.bind();
 
@@ -309,10 +360,13 @@ public:
         sp_raymarch.set_image("u_normal", normals_texture.get_handle(), 2, GL_READ_WRITE,
                               normals_texture.get_internal_format());
 
+        sp_raymarch.set_image("u_debug_texture", debug_texture.get_handle(), 3, GL_READ_WRITE,
+                              debug_texture.get_internal_format());
+
         for (int i = 0; i < 3; i++)
         {
             sp_raymarch.set_image((std::string("u_img_requests") + std::to_string(i)).c_str(),
-                                  request_imgs[i].get_handle(), 3 + i, GL_READ_WRITE,
+                                  request_imgs[i].get_handle(), 4 + i, GL_READ_WRITE,
                                   request_imgs[i].get_internal_format());
         }
 
@@ -327,11 +381,11 @@ public:
         raymarch_groups.y = (albedo_texture.height() + 15) / 16;
         raymarch_groups.z = 1;
 
-        gpu_timer.begin(1);
+        profiling_timer.begin_gpu("primary_ray");
         sp_raymarch.dispatch_compute(
             raymarch_groups, GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
                                  GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
-        gpu_timer.end(1);
+        profiling_timer.end_gpu("primary_ray");
 
         {
 
@@ -353,11 +407,11 @@ public:
             request_node_bitmask.bind_base(0);
             compact_requests_indirect.bind_base(1);
 
-            gpu_timer.begin(2);
+            profiling_timer.begin_gpu("requests_bitmask");
             sp_request_bitmask_gen.dispatch_compute(
                 groups, GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
                             GL_TEXTURE_FETCH_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
-            gpu_timer.end(2);
+            profiling_timer.end_gpu("requests_bitmask");
         }
 
         {
@@ -374,12 +428,12 @@ public:
 
             request_node_bitmask.bind_base(0);
             compact_nodes[slot].bind_base(1);
-            gpu_timer.begin(3);
+            profiling_timer.begin_gpu("requests_compact");
             sp_compact_requests.dispatch_compute_indirect(compact_requests_indirect,
                                                           GL_SHADER_STORAGE_BARRIER_BIT |
                                                               GL_BUFFER_UPDATE_BARRIER_BIT |
                                                               GL_TEXTURE_FETCH_BARRIER_BIT);
-            gpu_timer.end(3);
+            profiling_timer.end_gpu("requests_compact");
         }
 
         {
@@ -390,6 +444,7 @@ public:
             sp_composite.set_vec3("u_cam_pos", camera.get_position());
             sp_composite.set_uint("u_frame_index", frame_index);
             sp_composite.set_float("u_brightness", display_brightness);
+            sp_composite.set_float("u_probe_spacing", probe_spacing);
 
             probes.bind_base(0);
 
@@ -404,6 +459,9 @@ public:
 
             sp_composite.set_image("u_final", final_texture.get_handle(), 3, GL_READ_WRITE,
                                    final_texture.get_internal_format());
+
+            sp_composite.set_sampler("u_debug_texture", debug_texture.get_handle(), 0,
+                                     GL_TEXTURE_2D);
             sp_composite.dispatch_compute_grid(
                 glm::uvec3(final_texture.width(), final_texture.height(), 1), glm::uvec3(16, 16, 1),
                 GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
@@ -412,7 +470,6 @@ public:
         fences[slot] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
         frame_index++;
-        gpu_timer.update();
     }
     std::vector<uint32_t> compact_requests;
 
@@ -432,7 +489,7 @@ public:
                 if (data[vector_idx][elem_idx] != UINT32_MAX)
                 {
                     BuildInfo info = streaming_manager.get_build_info(data[vector_idx][elem_idx]);
-                    draw_aabb(info.chunk_origin, info.chunk_size);
+                    // draw_aabb(info.chunk_origin, info.chunk_size);
                 }
             }
 
@@ -440,7 +497,6 @@ public:
         {
             draw_aabb(glm::xyz(aabbs[i]), aabbs[i].w);
         }
-
         if (display_aabbs)
         {
 
@@ -460,23 +516,17 @@ public:
             }
         }
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        // draw_probes();
+
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         if (ImGui::IsKeyDown(ImGuiKey_P))
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        if (ImGui::IsKeyPressed(ImGuiKey_E))
+        if (ImGui::Begin("ddgi"))
         {
-            std::vector<uint32_t> pages;
-            auto p = camera.get_position();
-            BallContree::ball.x = p.x;
-            BallContree::ball.y = p.y;
-            BallContree::ball.z = p.z;
-            aabbs.clear();
-            modify_3d_dfs_fixed_page(&WorldContree::s_allocator, 0, WorldContree::s_nodes.data(),
-                                     BallContree::create3d, BallContree::homogeneous3d,
-                                     glm::vec3(0.f), 128.f, 4, pages, aabbs);
-            streaming_manager.upload_to_gpu();
+            ImGui::SliderFloat("probe_spacing", &probe_spacing, 1.f, 16.f);
         }
+        ImGui::End();
 
         if (ImGui::Begin("g-buffer"))
         {
@@ -491,6 +541,7 @@ public:
         }
         ImGui::End();
 
+        bool is_viewport_hovered = false;
         glm::vec2 region_screen = glm::vec2(0);
         if (ImGui::Begin("display"))
         {
@@ -499,18 +550,55 @@ public:
                          ImVec2(viewport_scale * final_texture.width(),
                                 viewport_scale * final_texture.height()),
                          ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+            is_viewport_hovered = ImGui::IsItemHovered();
+        }
+        ImGui::End();
+        if (ImGui::Begin("tree"))
+        {
+            // debug_print_tree(WorldContree::s_nodes.data());
+            ImGui::Separator();
+            for (int i = 0; i < 256; i++)
+            {
+                auto& node = WorldContree::s_nodes[i];
+
+                uint64_t combined_mask = static_cast<uint64_t>(node.childmask.mask[0]) |
+                                         (static_cast<uint64_t>(node.childmask.mask[1]) << 32);
+
+                std::bitset<64> mask_bits(combined_mask);
+
+                ImGui::Text("Node [%d] | data: %u | parent: %u | firstchild: %u | mask: %s", i,
+                            node.data, node.parent, node.firstchild, mask_bits.to_string().c_str());
+            }
+        }
+        ImGui::End();
+
+        if (ImGui::Begin("frame_time"))
+        {
+            for (uint32_t i = 0; i < profiling_names.size(); i++)
+            {
+                ImGui::SetCursorPosX(profiling_depths[i] * ImGui::CalcTextSize(" ").x * 4.f);
+                ImGui::Text("%s: %.3fms", profiling_names[i].c_str(),
+                            double(profiling_times[i]) / 1000000.0);
+            }
         }
         ImGui::End();
 
         if (ImGui::Begin("debug"))
         {
+            ImGui::SliderFloat2("minmax debug draw aabb", glm::value_ptr(draw_aabb_minmax_size),
+                                0.f, 32.f);
+
+            ImGui::SliderFloat("radius", &BallContree::ball.w, 1, 32);
+
             glm::vec2 mouse_screen = imgui_to_glm_vec2(ImGui::GetMousePos());
             glm::vec2 mouse_pos = (mouse_screen - region_screen) / viewport_scale;
             ImGui::Text("mouse_pos %.2f %.2f", mouse_pos.x, mouse_pos.y);
 
-            if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            static float d = 0.f;
+            static uint32_t brush_color = 0xfff;
+            if (is_viewport_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             {
-                float d = 0.f;
+
                 if (glm::all(glm::greaterThanEqual(mouse_pos, glm::vec2(0))) &&
                     glm::all(
                         glm::lessThan(mouse_pos, {depth_texture.width(), depth_texture.height()})))
@@ -520,26 +608,70 @@ public:
                                          GL_FLOAT, sizeof(d), &d);
                     ImGui::Text("depth: %f", d);
                 }
+                uint32_t r = rand() % 15 + 1;
+                uint32_t g = rand() % 15 + 1;
+                uint32_t b = rand() % 15 + 1;
+                brush_color = r | (g << 4) | (b << 8);
+                BallContree::color = 0;
+
+                auto create_ray = [&](glm::vec3& ro, glm::vec3& rd)
+                {
+                    glm::vec2 img_size = {depth_texture.width(), depth_texture.height()};
+
+                    glm::vec2 ndc = (mouse_pos + 0.5f) / img_size * 2.0f - 1.0f;
+                    ndc.y *= -1;
+                    float aspect = float(img_size.x) / float(img_size.y);
+
+                    glm::vec4 clip = glm::inverse(camera.get_projection_matrix()) *
+                                     glm::vec4(ndc, -1.0f, 1.0f);
+                    clip /= clip.w;
+                    glm::vec4 world_pos = glm::inverse(camera.get_view_matrix()) * clip;
+
+                    ro = camera.get_position();
+                    rd = glm::normalize(glm::xyz(world_pos) - ro);
+                };
+
+                glm::vec3 ro, rd;
+                create_ray(ro, rd);
+                glm::vec3 wp = ro + rd * d;
+
+                std::vector<uint32_t> pages;
+                BallContree::ball.x = wp.x;
+                BallContree::ball.y = wp.y;
+                BallContree::ball.z = wp.z;
+
+                aabbs.clear();
+
+                BallContree::color = brush_color;
+                BallContree::color = 0;
+                uint32_t before_pages = WorldContree::s_allocator.free_pages_count();
+                glm::uvec2 minmax_offset = modify_3d_dfs_fixed_page(
+                    &WorldContree::s_allocator, 0, WorldContree::s_nodes.data(),
+                    BallContree::create3d, BallContree::homogeneous3d, glm::vec3(0.f), 128.f, 5,
+                    pages, aabbs);
+                uint32_t after_pages = WorldContree::s_allocator.free_pages_count();
+
+                if (after_pages > before_pages)
+                    printf("edit freed: %u pages\n", after_pages - before_pages);
+                else
+                    printf("edit alloc: %u pages\n", before_pages - after_pages);
+
+                profiling_timer.begin_gpu("upload_edit");
+                streaming_manager.upload_to_gpu(minmax_offset.x, minmax_offset.y);
+                profiling_timer.end_gpu("upload_edit");
             }
 
             ImGui::Checkbox("display_aabbs", &display_aabbs);
-            for (std::size_t i = 0; i < 4; ++i)
-            {
-                double time_ms = 0.0;
-                if (gpu_timer.get_result_ms(i, time_ms))
-                    ImGui::Text("query %zu: %.3f ms", i, time_ms);
-                else
-                    ImGui::Text("query %zu: Pending...", i);
-            }
-            uint32_t* data_requested = &data[0][0];
-            for (int i = 0; i < 12; i++)
-            {
-                if (i < 11 && data_requested[i] == data_requested[i + 1])
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
-                ImGui::Text("[%u]", data_requested[i]);
-                if (i < 11 && data_requested[i] == data_requested[i + 1])
-                    ImGui::PopStyleColor(1);
-            }
+            // uint32_t* data_requested = &data[0][0];
+            // for (int i = 0; i < 12; i++)
+            //{
+            //     if (i < 11 && data_requested[i] == data_requested[i + 1])
+            //         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
+            //     ImGui::Text("[%u]", data_requested[i]);
+            //     if (i < 11 && data_requested[i] == data_requested[i + 1])
+            //         ImGui::PopStyleColor(1);
+            // }
+
             ImGui::Text("cached pages: %u", streaming_manager.m_free_pages.size());
             ImGui::Text("dt: %fms", 1000 * dt);
             ImGui::Text("allocated: %i/%i", streaming_manager.allocated_pages,
@@ -585,9 +717,9 @@ public:
             camera.translate(dt * speed * right_vector);
 
         if (input.is_key_held(GLFW_KEY_F))
-            speed *= glm::pow(2.f, dt);
+            speed *= glm::pow(8.f, dt);
         if (input.is_key_held(GLFW_KEY_R))
-            speed /= glm::pow(2.f, dt);
+            speed /= glm::pow(8.f, dt);
 
         if (input.is_button_held(GLFW_MOUSE_BUTTON_RIGHT))
             camera.rotate(input.get_mouse_dx() * sensitivity, input.get_mouse_dy() * sensitivity);
@@ -611,6 +743,11 @@ public:
 
     void draw_aabb(const glm::vec3& min, const glm::vec3& size)
     {
+        if (glm::any(glm::greaterThanEqual(size, glm::vec3(draw_aabb_minmax_size.y))))
+            return;
+        if (glm::any(glm::lessThan(size, glm::vec3(draw_aabb_minmax_size.x))))
+            return;
+
         sp_aabb.bind();
 
         sp_aabb.set_mat4("u_mvp", camera.get_vp_matrix());
@@ -624,6 +761,41 @@ public:
         sp_aabb.unbind();
     }
 
+    void draw_probes()
+    {
+        sp_probes_debug.bind();
+
+        probes.bind_base(0);
+
+        sp_probes_debug.set_sampler("u_depth", depth_texture.get_handle(), 0, GL_TEXTURE_2D);
+        sp_probes_debug.set_mat4("u_view", camera.get_view_matrix());
+        sp_probes_debug.set_mat4("u_proj", camera.get_projection_matrix());
+        sp_probes_debug.set_float("u_near", 0.125f);
+        sp_probes_debug.set_float("u_far", 2048.f);
+        sp_probes_debug.set_float("u_probe_spacing", probe_spacing);
+        sp_probes_debug.set_float("u_point_size", probe_point_size);
+        sp_probes_debug.set_vec2("u_screen_size",
+                                 glm::vec2(final_texture.width(), final_texture.height()));
+
+        glBindVertexArray(empty_vao);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, 4096);
+
+        sp_probes_debug_ray.bind();
+        probes.bind_base(0);
+
+        sp_probes_debug_ray.set_vec2("u_screen_size",
+                                     glm::vec2(final_texture.width(), final_texture.height()));
+        sp_probes_debug_ray.set_sampler("u_depth", depth_texture.get_handle(), 0, GL_TEXTURE_2D);
+        sp_probes_debug_ray.set_mat4("u_view", camera.get_view_matrix());
+        sp_probes_debug_ray.set_mat4("u_proj", camera.get_projection_matrix());
+        sp_probes_debug_ray.set_float("u_probe_spacing", probe_spacing);
+        sp_probes_debug_ray.set_float("u_near", 0.125f);
+        sp_probes_debug_ray.set_float("u_far", 2048.f);
+
+        glBindVertexArray(empty_vao);
+        glDrawArraysInstanced(GL_LINES, 0, 2, 4096);
+    }
+    glm::vec2 draw_aabb_minmax_size = glm::vec2(0, 100);
     void draw_aabb(const glm::vec3& min, float size) { draw_aabb(min, glm::vec3(size)); }
 
     GLFWwindow* window;
@@ -652,17 +824,21 @@ public:
     Shader sp_compact_requests;
     Shader sp_irradiance_raymarch;
     Shader sp_composite;
+    Shader sp_probes_debug;
+    Shader sp_probes_debug_ray;
 
     Texture request_imgs[3];
     Ssbo request_node_bitmask;
     Ssbo compact_nodes[2];
     Ssbo compact_requests_indirect;
 
-    inline static const char* g_buffer_names[] = {"final", "albedo", "depth", "normal", "indirect"};
+    inline static const char* g_buffer_names[] = {"final",    "albedo",       "depth",     "normal",
+                                                  "indirect", "subdiv_depth", "iterations"};
     Texture albedo_texture;
     Texture depth_texture;
     Texture normals_texture;
     Texture final_texture;
+    Texture debug_texture;
 
     Ssbo probes;
 
@@ -670,16 +846,20 @@ public:
     uint32_t rbo = 0;
     uint32_t empty_vao = 0;
 
-    GpuTimer gpu_timer = GpuTimer(4);
+    Timer profiling_timer;
 
     std::vector<glm::vec4> aabbs;
 
     uint32_t display_texture = 0;
     float display_brightness = 1.f;
-    float viewport_scale = 2.f;
+    float viewport_scale = 1.5f;
+
+    float probe_spacing = 8.f;
+    float probe_point_size = 3.f;
     inline static constexpr uint32_t DISPLAY_FINAL = 0;
     inline static constexpr uint32_t DISPLAY_ALBEDO = 1;
     inline static constexpr uint32_t DISPLAY_DEPTH = 2;
     inline static constexpr uint32_t DISPLAY_NORMAL = 3;
     inline static constexpr uint32_t DISPLAY_INDIRECT = 4;
+    inline static constexpr uint32_t DISPLAY_SUBDIV_DEPTH = 5;
 };

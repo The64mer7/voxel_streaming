@@ -4,6 +4,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 struct Probe
 {
     vec3 indirect;
+    vec3 last_ray_dir;
 };
 
 layout(std430, binding = 0) buffer IrradianceProbes
@@ -15,6 +16,7 @@ layout(std430, binding = 0) buffer IrradianceProbes
 layout(rgba8, binding = 0) uniform image2D u_albedo;
 layout(r16f, binding = 1) uniform image2D u_depth;
 layout(rgba16_snorm, binding = 2) uniform image2D u_normal;
+uniform sampler2D u_debug_texture;
 
 layout(rgba8, binding = 3) uniform image2D u_final;
 
@@ -23,6 +25,7 @@ uniform vec3 u_cam_pos;
 uniform mat4 u_inv_proj;
 uniform mat4 u_inv_view;
 uniform float u_brightness;
+uniform float u_probe_spacing;
 
 ivec2 screen_coords()
 {
@@ -49,6 +52,8 @@ void create_ray(ivec2 uvi, out vec3 ro, out vec3 rd)
 #define DISPLAY_DEPTH 2
 #define DISPLAY_NORMAL 3
 #define DISPLAY_INDIRECT 4
+#define DISPLAY_SUBDIV_DEPTH 5
+#define DISPLAY_ITERATIONS 6
 
 vec3 trilinear_interpolate(
     vec3 c000, vec3 c100, vec3 c010, vec3 c110,
@@ -95,7 +100,7 @@ ivec3 coord_from_world(vec3 wp, float size)
 
 vec3 sample_indirect_light(vec3 wp, vec3 normal)
 {
-    uvec3 probe_coord00 = coord_from_world(wp, 4.f);
+    uvec3 probe_coord00 = coord_from_world(wp, u_probe_spacing);
     if (all(lessThan(probe_coord00, uvec3(15))))
     {
         vec3 probe_colors[8];
@@ -106,7 +111,7 @@ vec3 sample_indirect_light(vec3 wp, vec3 normal)
             probe_colors[i] = probe.indirect;
         }
     
-        vec3 indirect_light = trilinear_interpolate(probe_colors, vec3(fract(wp/4.f)));
+        vec3 indirect_light = trilinear_interpolate(probe_colors, vec3(fract(wp/u_probe_spacing)));
         return indirect_light;
     }
     return vec3(0.f);
@@ -117,15 +122,35 @@ float sample_shadow_factor(vec3 wp)
     return 1.f;
 }
 
+vec3 sun_dir()
+{
+    return normalize(vec3(1,-1,1));
+}
+
 vec3 sample_direct_light(vec3 wp, vec3 normal)
 {
-    vec3 sun_dir = normalize(vec3(1,-1,1));
     vec3 sun_color = vec3(200, 182, 150)/255.f;
-    float sun_intensity = 1.f;
-    float n_dot_l = max(dot(normal, -sun_dir), 0.f);
+    float sun_intensity = 2.f;
+    float n_dot_l = max(dot(normal, -sun_dir()), 0.f);
 
     return sun_intensity * sun_color * n_dot_l * sample_shadow_factor(wp);
 }
+
+vec3 calculate_brdf(vec3 L, vec3 V, vec3 N, vec3 albedo, float shininess)
+{
+    float N_dot_L = dot(N, L);
+    vec3 H = normalize(L + V);
+
+    vec3 diffuse = albedo / 3.14159f;
+    vec3 specular_color = vec3(1.f);
+    float spec = (shininess + 2.0) / (2.0 * 3.14159265)
+           * pow(max(dot(N, H), 0.0), shininess);
+
+    vec3 specular = vec3(spec);
+    vec3 brdf = diffuse + specular;
+    return brdf;
+}
+
 
 vec3 calculate_incoming_light(ivec2 uvi)
 {
@@ -137,14 +162,47 @@ vec3 calculate_incoming_light(ivec2 uvi)
 
     vec3 normal = imageLoad(u_normal, uvi).xyz;
     float depth = imageLoad(u_depth, uvi).x;
+    vec3 albedo = imageLoad(u_albedo, uvi).rgb;
+
     if (depth > -0.5f)
     {
         vec3 hit_p = ro + rd * depth;
         vec3 quantized_hit_p = floor(hit_p / voxel_size) * voxel_size;
-        vec3 incoming_light = sample_indirect_light(quantized_hit_p, normal) + sample_direct_light(quantized_hit_p, normal);
-        return incoming_light;
+        
+        vec3 L = -sun_dir();
+        vec3 V = -rd;
+        vec3 brdf = calculate_brdf(L, V, normal, albedo, 0.f);
+        
+        vec3 indirect_light = sample_indirect_light(quantized_hit_p, normal);
+        vec3 direct_light = sample_direct_light(quantized_hit_p, normal) * brdf;
+        
+        vec3 reflected_light = indirect_light * (albedo / 3.14159) + direct_light;
+        return reflected_light;
     }
     return vec3(0);
+}
+
+vec3 sample_skybox(vec3 rd)
+{
+    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+
+    vec3 horizon_color = vec3(1.0, 0.55, 0.2);
+    vec3 zenith_color = vec3(0.25, 0.5, 0.9);
+    vec3 sky = mix(horizon_color, zenith_color, t);
+
+    vec3 sun_color = vec3(1.0, 0.85, 0.55) * 10.0;
+    float sun = smoothstep(0.9995, 0.9998, dot(rd, -sun_dir()));
+
+    return sky + sun_color * sun;
+}
+
+vec3 hash_u1f3(uint v)
+{
+    vec3 c;
+    c.x = v * 14519518 + 19519521;
+    c.y = v * 1565851562 + 512156251;
+    c.z = v * 495266251 + 154621665;
+    return fract(c / 256.f);
 }
 
 void main()
@@ -165,19 +223,49 @@ void main()
         depth.x *= u_brightness;
         imageStore(u_final, uvi, depth);
     }
+    if (u_display_texture == DISPLAY_ITERATIONS)
+    {
+        vec4 debug = texelFetch(u_debug_texture, uvi, 0);
+        imageStore(u_final, uvi, vec4(debug.r * u_brightness, 0,0,1));
+    }
     if (u_display_texture == DISPLAY_NORMAL)
     {
-        vec4 normal = imageLoad(u_normal, uvi);
-        imageStore(u_final, uvi, normal);
+        vec3 normal = imageLoad(u_normal, uvi).rgb;
+        imageStore(u_final, uvi, vec4(normal * 0.5f + 0.5f, 1.f));
+    }
+    if (u_display_texture == DISPLAY_SUBDIV_DEPTH)
+    {
+        float depth = imageLoad(u_normal, uvi).a;
+        imageStore(u_final, uvi, vec4(vec3(depth), 1.f));
     }
     if (u_display_texture == DISPLAY_INDIRECT)
     {
+        vec3 ro;
+        vec3 rd;
+        float voxel_size = 64.f / pow(4.f, 4.f);
+        float depth = imageLoad(u_depth, uvi).r;
 
+        create_ray(uvi, ro, rd);
+        vec3 hit_p = ro + rd * depth;
+        vec3 quantized_hit_p = floor(hit_p / voxel_size) * voxel_size;
+        vec3 normal = imageLoad(u_normal, uvi).xyz;
+
+        vec3 indirect_light = sample_indirect_light(quantized_hit_p, normal);
+        
+        imageStore(u_final, uvi, vec4(indirect_light, 1.f));
     }
     if (u_display_texture == DISPLAY_FINAL)
     {
-        vec3 albedo = imageLoad(u_albedo, uvi).rgb;
+        float depth = imageLoad(u_depth, uvi).r;
+        if (depth < 0.f)
+        {
+            vec3 ro, rd;
+            create_ray(uvi, ro, rd);
+            vec3 sky_color = sample_skybox(rd);
+            imageStore(u_final, uvi, vec4(sky_color, 1.f));
+            return;
+        }
         vec3 incoming_light = calculate_incoming_light(uvi);
-        imageStore(u_final, uvi, vec4(albedo * incoming_light, 1.f));
+        imageStore(u_final, uvi, vec4(incoming_light, 1.f));
     }
 }

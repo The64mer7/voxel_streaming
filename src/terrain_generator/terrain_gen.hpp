@@ -126,7 +126,7 @@ public:
     inline static float terrain_amp = 2.f;
     inline static float terrain_detail_scale = 2.5f;
     inline static float terrain_detail_amp = 0.025f;
-    inline static float flat_terrain_factor = 0.3f;
+    inline static float flat_terrain_factor = 2.3f;
 
     static glm::vec2 minmax_map(glm::vec3 p, glm::vec3 half_size)
     {
@@ -162,13 +162,22 @@ public:
         return glm::normalize(glm::vec3(dx, dy, dz));
     }
 
-    static uint32_t pack_normal(glm::vec3 normal)
+    static uint32_t pack_normal(const glm::vec3& normal)
     {
+        static uint32_t rand_hash = 0;
         uint32_t packed = 0;
         uint32_t quantized_bits = 4;
         uint32_t max_val = (1 << quantized_bits) - 1;
 
-        glm::uvec3 quantized = glm::uvec3(float(max_val) * (normal * 0.5f + 0.5f));
+        glm::vec3 normal01 = (normal * 0.5f + 0.5f);
+        glm::vec3 scaled_normal = float(max_val) * normal01;
+
+        float random = glm::fract(float(rand_hash) / 1024.f);
+        rand_hash = 551 * rand_hash + 6251;
+
+        glm::uvec3 quantized = glm::uvec3(
+            glm::min(glm::floor(scaled_normal + random), float(max_val)));
+
         return quantized.x | (quantized.y << quantized_bits) |
                (quantized.z << (2 * quantized_bits));
     }

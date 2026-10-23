@@ -26,6 +26,7 @@ public:
         std::lock_guard lock(m_mtx);
         m_allocator.free_page(offset / m_alloc_size);
     }
+    uint32_t free_pages_count() { return m_allocator.free_pages_count(); }
 
 private:
     std::mutex m_mtx;

@@ -155,8 +155,22 @@ void Application::run()
 
 void Application::update(float dt)
 {
+    profiling_names.clear();
+    profiling_times.clear();
+    profiling_depths.clear();
+    profiling_timer.for_each_gpu_time(
+        [&](const std::string& name, uint64_t elapsed_ns, uint32_t depth)
+        {
+            profiling_names.push_back(name);
+            profiling_times.push_back(elapsed_ns);
+            profiling_depths.push_back(depth);
+        });
+    profiling_timer.update();
+
+    profiling_timer.begin_gpu("gpu_frame");
     tick(dt);
     render(dt);
+    profiling_timer.end_gpu("gpu_frame");
 }
 
 // GLFW, GLAD, ImGui cleanup

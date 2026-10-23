@@ -1,4 +1,3 @@
-// gpu_timer.hpp
 #pragma once
 
 #include <glad/gl.h>
@@ -7,86 +6,108 @@
 #include <string>
 #include <vector>
 
-class GpuTimer
+class Timer
 {
 public:
-    explicit GpuTimer(std::size_t num_queries, std::size_t ring_size = 4)
-        : m_num_queries(num_queries), m_ring_size(ring_size), m_queries(num_queries * ring_size, 0),
-          m_active_queries(num_queries, false), m_initialized(false), m_current_frame(0)
+    ~Timer()
     {
+        for (auto& node : queries)
+        {
+            glDeleteQueries(node.num_queries, node.begin_queries);
+            glDeleteQueries(node.num_queries, node.end_queries);
+        }
     }
 
-    ~GpuTimer()
+    void update()
     {
-        if (m_initialized)
-            glDeleteQueries(static_cast<GLsizei>(m_queries.size()), m_queries.data());
+        for (auto& node : queries)
+        {
+            node.current_query_idx = (node.current_query_idx + 1) % node.num_queries;
+        }
+        curr_nested_depth = 0;
+        frame_index++;
     }
 
-    GpuTimer(const GpuTimer&) = delete;
-    GpuTimer& operator=(const GpuTimer&) = delete;
-
-    void begin(std::size_t query_index)
+    template <typename ForEachPFN>
+    void for_each_gpu_time(ForEachPFN fn_for_each)
     {
-        initialize();
+        for (int i = 0; i < queries.size(); i++)
+        {
+            auto& node = queries[i];
+            uint32_t read_idx = (node.current_query_idx + 1) % node.num_queries;
 
-        if (m_active_queries[query_index])
+            int avail = 0;
+            glGetQueryObjectiv(node.end_queries[read_idx], GL_QUERY_RESULT_AVAILABLE, &avail);
+
+            if (avail && int32_t(frame_index) - int32_t(lru[i]) < node.num_queries)
+            {
+                uint64_t begin = 0;
+                uint64_t end = 0;
+
+                glGetQueryObjectui64v(node.begin_queries[read_idx], GL_QUERY_RESULT, &begin);
+                glGetQueryObjectui64v(node.end_queries[read_idx], GL_QUERY_RESULT, &end);
+
+                uint64_t elapsed = end - begin;
+
+                fn_for_each(names[i], elapsed, node.depth);
+            }
+        }
+    }
+
+    void begin_gpu(const std::string& name)
+    {
+        auto it = name_to_query.find(name);
+        if (it == name_to_query.end())
+        {
+            ProfilingNode node;
+            glCreateQueries(GL_TIMESTAMP, ProfilingNode::num_queries, node.begin_queries);
+            glCreateQueries(GL_TIMESTAMP, ProfilingNode::num_queries, node.end_queries);
+
+            uint32_t query_idx = static_cast<uint32_t>(queries.size());
+            name_to_query[name] = query_idx;
+            queries.push_back(node);
+            names.push_back(name);
+            lru.push_back(frame_index);
+            it = name_to_query.find(name);
+        }
+
+        uint32_t query_idx = it->second;
+        ProfilingNode& node = queries[query_idx];
+        lru[query_idx] = frame_index;
+        uint32_t query_id = node.begin_queries[node.current_query_idx];
+        glQueryCounter(query_id, GL_TIMESTAMP);
+        node.depth = curr_nested_depth;
+        curr_nested_depth++;
+    }
+
+    void end_gpu(const std::string& name)
+    {
+        auto it = name_to_query.find(name);
+        if (it == name_to_query.end())
             return;
 
-        glBeginQuery(GL_TIME_ELAPSED, get_query(query_index));
-        m_active_queries[query_index] = true;
+        uint32_t query_idx = it->second;
+        ProfilingNode& node = queries[query_idx];
+        uint32_t query_id = node.end_queries[node.current_query_idx];
+        glQueryCounter(query_id, GL_TIMESTAMP);
+        curr_nested_depth--;
     }
 
-    void end(std::size_t query_index)
-    {
-        if (!m_active_queries[query_index])
-            return;
-
-        glEndQuery(GL_TIME_ELAPSED);
-        m_active_queries[query_index] = false;
-    }
-
-    void update() { m_current_frame = (m_current_frame + 1) % m_ring_size; }
-
-    bool get_result_ms(std::size_t query_index, double& result_ms) const
-    {
-        if (!m_initialized)
-            return false;
-
-        const GLuint query = get_query(query_index);
-
-        GLint available = GL_FALSE;
-        glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE, &available);
-
-        if (!available)
-            return false;
-
-        GLuint64 elapsed_ns = 0;
-        glGetQueryObjectui64v(query, GL_QUERY_RESULT, &elapsed_ns);
-
-        result_ms = static_cast<double>(elapsed_ns) / 1'000'000.0;
-        return true;
-    }
+    uint32_t frame_index = 0;
 
 private:
-    std::size_t m_num_queries;
-    std::size_t m_ring_size;
-    std::vector<GLuint> m_queries;
-    std::vector<bool> m_active_queries;
-    bool m_initialized;
-    std::size_t m_current_frame;
-
-    void initialize()
+    struct ProfilingNode
     {
-        if (m_initialized)
-            return;
+        inline static constexpr uint32_t num_queries = 3;
+        uint32_t begin_queries[num_queries];
+        uint32_t end_queries[num_queries];
+        uint32_t current_query_idx = 0;
+        uint32_t depth = 0;
+    };
 
-        glGenQueries(static_cast<GLsizei>(m_queries.size()), m_queries.data());
-
-        m_initialized = true;
-    }
-
-    GLuint get_query(std::size_t query_index) const
-    {
-        return m_queries[m_current_frame * m_num_queries + query_index];
-    }
+    uint32_t curr_nested_depth = 0;
+    std::unordered_map<std::string, uint32_t> name_to_query;
+    std::vector<ProfilingNode> queries;
+    std::vector<std::string> names;
+    std::vector<uint32_t> lru;
 };

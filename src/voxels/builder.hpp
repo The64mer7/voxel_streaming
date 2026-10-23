@@ -4,6 +4,8 @@
 #include "node.hpp"
 #include <glm/glm.hpp>
 
+#include "voxels/collision.hpp"
+
 struct BuildInfo
 {
     glm::ivec3 coord;
@@ -64,13 +66,58 @@ bool subdivide_node(const BuildInfo& info, const GenerateInfo<PFNCreate, PFNHomo
     return true;
 }
 
+static void subdivide_nodes(NodeT* nodes, uint32_t idx, NodeAllocator* allocator)
+{
+    if (nodes[idx].firstchild == UINT32_MAX)
+    {
+        uint32_t c_idx = allocator->allocate();
+        nodes[idx].firstchild = c_idx;
+        nodes[idx].childmask.fill_mask(0, 63);
+        for (int i = 0; i < 64; i++)
+        {
+            nodes[c_idx + i].parent = idx;
+            nodes[c_idx + i].firstchild = UINT32_MAX;
+            nodes[c_idx + i].clear_bits();
+            nodes[c_idx + i].data = nodes[idx].data;
+        }
+        return;
+    }
+    uint32_t first = nodes[idx].firstchild;
+    for (int i = 0; i < 64; i++)
+    {
+        if (nodes[idx].get_bit(i))
+        {
+        }
+        else
+        {
+            nodes[first + i].firstchild = UINT32_MAX;
+            nodes[first + i].data = nodes[idx].data;
+            nodes[first + i].clear_bits();
+            nodes[first + i].parent = idx;
+        }
+        subdivide_nodes(nodes, first + i, allocator);
+    }
+}
+
+static void copy_node_data_to_children(NodeT* nodes, uint32_t idx, uint32_t first_child)
+{
+    nodes[idx].firstchild = first_child;
+    nodes[idx].childmask.fill_mask(0, 63);
+    for (int i = 0; i < 64; i++)
+    {
+        nodes[first_child + i].parent = idx;
+        nodes[first_child + i].firstchild = UINT32_MAX;
+        nodes[first_child + i].clear_bits();
+        nodes[first_child + i].data = nodes[idx].data;
+    }
+}
+
 static void free_children_3d_fixed_page(NodeAllocator* allocator, uint32_t node_idx, NodeT* nodes)
 {
     uint32_t first_child = nodes[node_idx].firstchild;
     if (first_child == UINT32_MAX)
         return;
     nodes[node_idx].firstchild = UINT32_MAX;
-
     uint32_t children_page_id = first_child / 64;
     for (int i = 0; i < 64; i++)
     {
@@ -83,84 +130,113 @@ static void free_children_3d_fixed_page(NodeAllocator* allocator, uint32_t node_
 }
 
 template <typename CreateFunc, typename HomogeneousFunc>
-static bool modify_3d_dfs_fixed_page(NodeAllocator* allocator, uint32_t root_idx, NodeT* nodes,
-                                     CreateFunc modify_fn, HomogeneousFunc modify_homogeneous_fn,
-                                     const glm::vec3& chunk_origin, float chunk_size,
-                                     uint32_t max_depth, std::vector<uint32_t>& out_pages,
-                                     std::vector<glm::vec4>& aabbs)
-
+struct Contree3DModifier
 {
-    struct StackFrame
+    NodeAllocator* allocator;
+    NodeT* nodes;
+    CreateFunc modify_fn;
+    HomogeneousFunc modify_homogeneous_fn;
+    uint32_t max_depth;
+    std::vector<glm::vec4>* aabbs;
+    glm::uvec2 out_minmax = glm::uvec2(UINT32_MAX, 0);
+
+    bool modify_3d_dfs_rec(const glm::vec3& origin, float size, uint32_t node_idx, uint32_t depth)
     {
-        uint32_t node_idx;
-        glm::vec3 origin;
-        float size;
-        int depth;
-    };
-    thread_local std::vector<StackFrame> stack;
-    stack.push_back({root_idx, chunk_origin, chunk_size, 0});
+        if (node_idx == UINT32_MAX)
+            return false;
 
-    while (!stack.empty())
-    {
-        StackFrame frame = stack.back();
-        stack.pop_back();
-
-        NodeT& node = nodes[frame.node_idx];
-
-        uint32_t first_child = node.firstchild;
-        if (modify_homogeneous_fn(frame.origin, frame.size))
+        uint32_t data = 0;
+        bool affects_volume = modify_fn(origin, size, &data);
+        if (!affects_volume)
         {
-            if (first_child != UINT32_MAX)
-            {
-                free_children_3d_fixed_page(allocator, frame.node_idx, nodes);
-            }
-            node.clear_bits();
-            node.firstchild = UINT32_MAX;
-            continue;
+            return false;
         }
-        else
+
+        if (depth >= max_depth)
         {
-            if (frame.depth >= max_depth)
-                continue;
+            nodes[node_idx].data = data;
+
+            out_minmax.x = glm::min(node_idx, out_minmax.x);
+            out_minmax.y = glm::max(node_idx, out_minmax.y);
+            return true;
+        }
+
+        bool is_homogeneous = modify_homogeneous_fn(origin, size);
+        if (is_homogeneous)
+        {
+            aabbs->push_back(glm::vec4(origin, size));
+
+            printf("cleared %u %f %u\n", node_idx, size, depth);
+            free_children_3d_fixed_page(allocator, node_idx, nodes);
+            nodes[node_idx].clear_bits();
+            nodes[node_idx].firstchild = UINT32_MAX;
+            nodes[node_idx].data = data;
+            return true;
+        }
+
+        uint32_t first_child = nodes[node_idx].firstchild;
+        // if (first_child == UINT32_MAX)
+        //     aabbs->push_back(glm::vec4(origin, size));
+
+        if (first_child == UINT32_MAX)
+        {
+            first_child = allocator->allocate();
             if (first_child == UINT32_MAX)
-            {
-                aabbs.push_back(glm::vec4(frame.origin, frame.size));
-                first_child = allocator->allocate();
-                node.firstchild = first_child;
-                node.childmask.fill_mask(0, 63);
-                for (int i = 0; i < 64; i++)
-                {
-                    nodes[first_child + i].data = node.data;
-                    nodes[first_child + i].parent = frame.node_idx;
-                    nodes[first_child + i].firstchild = UINT32_MAX;
-                    nodes[first_child + i].clear_bits();
-                }
-            }
+                exit(1);
+
+            nodes[node_idx].firstchild = first_child;
+            nodes[node_idx].childmask.clear();
             for (int i = 0; i < 64; i++)
             {
-                StackFrame child;
-                child.depth = frame.depth + 1;
-                child.size = frame.size / 4;
-                child.origin = frame.origin + child.size * glm::vec3(i % 4, (i / 4) % 4, i / 16);
-                child.node_idx = first_child + i;
-
-                uint32_t data = 0;
-                bool modify_child = modify_fn(child.origin, child.size, &data);
-                if (modify_child)
-                {
-                    if (!node.get_bit(i))
-                    {
-                        nodes[child.node_idx].parent = frame.node_idx;
-                    }
-                    nodes[child.node_idx].data = data;
-                    stack.push_back(child);
-
-                    node.childmask.set(i);
-                }
+                nodes[first_child + i].parent = idx;
+                nodes[first_child + i].firstchild = UINT32_MAX;
+                nodes[first_child + i].clear_bits();
+                nodes[first_child + i].data = nodes[idx].data;
             }
+            out_minmax.x = glm::min(first_child, out_minmax.x);
+            out_minmax.y = glm::max(first_child + 63, out_minmax.y);
         }
+
+        bool modified = false;
+        for (int i = 0; i < 64; i++)
+        {
+            float child_size = size * 0.25f;
+            glm::vec3 child_origin = origin +
+                                     child_size * glm::vec3(glm::ivec3(i, i / 4, i / 16) % 4);
+            uint32_t child_idx = first_child + i;
+            // if (!nodes[node_idx].get_bit(i))
+            //{
+            //     nodes[child_idx].clear_bits();
+            //     nodes[child_idx].firstchild = UINT32_MAX;
+            //     nodes[child_idx].data = nodes[node_idx].data;
+            //     nodes[child_idx].parent = node_idx;
+            // }
+
+            modified = modified ||
+                       modify_3d_dfs_rec(child_origin, child_size, child_idx, depth + 1);
+        }
+        return modified;
     }
-    return true;
+};
+
+template <typename CreateFunc, typename HomogeneousFunc>
+static glm::uvec2
+modify_3d_dfs_fixed_page(NodeAllocator* allocator, uint32_t root_idx, NodeT* nodes,
+                         CreateFunc modify_fn, HomogeneousFunc modify_homogeneous_fn,
+                         const glm::vec3& chunk_origin, float chunk_size, uint32_t max_depth,
+                         std::vector<uint32_t>& out_pages, std::vector<glm::vec4>& aabbs)
+
+{
+    Contree3DModifier<CreateFunc, HomogeneousFunc> modifier;
+    modifier.out_minmax = glm::uvec2(0);
+    modifier.allocator = allocator;
+    modifier.nodes = nodes;
+    modifier.modify_fn = modify_fn;
+    modifier.modify_homogeneous_fn = modify_homogeneous_fn;
+    modifier.max_depth = max_depth;
+    modifier.aabbs = &aabbs;
+    modifier.modify_3d_dfs_rec(chunk_origin, chunk_size, root_idx, 0);
+    return modifier.out_minmax;
 }
 
 template <typename CreateFunc, typename HomogeneousFunc>
@@ -236,6 +312,107 @@ static bool create_3d_dfs_fixed_page(NodeAllocator* allocator, uint32_t root_idx
                         child_node.clear_bits();
                         child_node.firstchild = UINT32_MAX;
                         child_node.parent = frame.node_idx;
+                        uint32_t flat_idx = x + 4 * y + 16 * z;
+                        nodes[frame.node_idx].set_bit(flat_idx);
+
+                        nodes[first_child_idx + flat_idx] = child_node;
+                        stack.emplace_back(first_child_idx + flat_idx, child_origin, child_size,
+                                           frame.depth + 1);
+                        num_nodes++;
+                    }
+                }
+        if (num_nodes != 0)
+        {
+            nodes[frame.node_idx].firstchild = first_child_idx;
+        }
+        else
+        {
+            free_nodes(first_child_idx);
+        }
+    }
+    printf("pages %u\n", out_pages.size());
+    return true;
+}
+
+static bool create_3d_dfs_mesh_fixed_page(NodeAllocator* allocator, uint32_t root_idx, NodeT* nodes,
+                                          ame_bvh& bvh, const glm::vec3& chunk_origin,
+                                          float chunk_size, uint32_t max_depth,
+                                          std::vector<uint32_t>& out_pages)
+{
+    struct StackFrame
+    {
+        uint32_t node_idx;
+        glm::vec3 origin;
+        float size;
+        int depth;
+    };
+
+    NodeT root_node;
+    root_node.clear_bits();
+    root_node.parent = UINT32_MAX;
+    root_node.firstchild = UINT32_MAX;
+    BVHIntersectAABBInfo root_info;
+
+    if (!bvh_aabb_intersect(&root_info, bvh, 0, chunk_origin, chunk_origin + chunk_size))
+    {
+        return false;
+    }
+    root_node.data = 0xfff;
+    root_node.data |= TerrainGen::pack_normal(root_info.normal) << 12;
+
+    auto allocate_nodes = [&]()
+    {
+        uint32_t absolute_index = allocator->allocate();
+        if (absolute_index == UINT32_MAX)
+        {
+            printf("out of mem");
+            exit(1);
+        }
+        out_pages.push_back(absolute_index / 64);
+        return absolute_index;
+    };
+
+    nodes[root_idx] = root_node;
+    allocate_nodes();
+
+    auto free_nodes = [&](uint32_t page_offset) { allocator->free(page_offset); };
+
+    thread_local std::vector<StackFrame> stack;
+    stack.clear();
+    stack.push_back({root_idx, chunk_origin, chunk_size, 0});
+
+    while (!stack.empty())
+    {
+        StackFrame frame = stack.back();
+        stack.pop_back();
+        NodeT node = nodes[frame.node_idx];
+
+        if (frame.depth >= max_depth)
+        {
+            continue;
+        }
+        uint32_t first_child_idx = allocate_nodes();
+
+        uint32_t num_nodes = 0;
+        for (int z = 0; z < 4; z++)
+            for (int y = 0; y < 4; y++)
+                for (int x = 0; x < 4; x++)
+                {
+                    float child_size = frame.size * 0.25f;
+                    glm::vec3 child_origin = frame.origin + child_size * glm::vec3(x, y, z);
+
+                    NodeT child_node;
+
+                    BVHIntersectAABBInfo info;
+                    bool created = bvh_aabb_intersect(&info, bvh, 0, child_origin,
+                                                      child_origin + child_size);
+                    if (created)
+                    {
+                        child_node.clear_bits();
+                        child_node.firstchild = UINT32_MAX;
+                        child_node.parent = frame.node_idx;
+                        child_node.data = 0xfffu;
+                        child_node.data |= TerrainGen::pack_normal(info.normal) << 12;
                         uint32_t flat_idx = x + 4 * y + 16 * z;
                         nodes[frame.node_idx].set_bit(flat_idx);
 
