@@ -240,7 +240,7 @@ public:
         return coord;
     }
 
-    inline static constexpr bool use_world_nodes = true;
+    bool use_world_nodes = true;
     void upload_to_gpu()
     {
         if (use_world_nodes)

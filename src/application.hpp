@@ -69,7 +69,7 @@ public:
 
     void start()
     {
-        constexpr uint32_t num_nodes = 1024 * 1024 * 128;
+        constexpr uint32_t num_nodes = 1024 * 1024 * 64;
         streaming_manager.init(num_nodes, 64);
         streaming_manager.cam = &camera;
         // TODO:
@@ -362,8 +362,8 @@ public:
             glDeleteSync(fences[slot]);
             fences[slot] = nullptr;
 
-            // old_stream(slot);
-            stream_nodes();
+            old_stream(slot);
+            // stream_nodes();
         }
 
         sp_irradiance_raymarch.bind();
