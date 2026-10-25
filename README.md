@@ -1,12 +1,56 @@
 # Voxel Streaming
 
-This project features streaming voxels in VRAM and RAM. It is based on paper "GigaVoxels: Ray-Guided Streaming Analysis of Large Octree Structures".
+An experimental voxel streaming and rendering application inspired by
+[*GigaVoxels: Ray-Guided Streaming Analysis of Large Octree Structures*](https://doi.org/10.1145/1507149.1507152).
+It is a native C++20 application using OpenGL, GLFW, and Dear ImGui.
 
-To run this project, follow these steps:
-1. **Open the Project**: Right-click on the root directory of the project and select "Open with Visual Studio". This will load the project into Visual Studio.
-2. **Build the Project**: Once the project is open, click on the play button (or press F5) to build the project. Make sure to select `opengl_app.exe` as the startup project if prompted.
-3. **Run the Project**: After building, the application will run, and you should see the OpenGL window displaying your graphics.
-4. **Modify and Experiment**: You can now modify the code in the project to experiment with different OpenGL features and see how they affect the rendering.
-5. **Dependencies**: Ensure that you have the necessary OpenGL libraries and drivers installed on your system to run the application successfully.
-6. **Troubleshooting**: If you encounter any issues while building or running the project, check the output window in Visual Studio for error messages and ensure that all dependencies are correctly set up.
-7. **Additional Resources**: For more information on OpenGL programming, consider referring to the official OpenGL documentation and tutorials available online.
+## Requirements
+
+- Windows with an OpenGL 4.6-capable GPU and up-to-date graphics drivers.
+- CMake 3.25 or newer, Ninja, GCC/G++, and Git.
+- An internet connection during the first CMake configure, to fetch
+  `tinyobjloader`, GLM, FastNoise2, stb, and xsimd.
+
+The checked-in CMake presets select GCC/G++ and Ninja, and are intended to be
+used from an MSYS2 **UCRT64** terminal with those tools available on `PATH`.
+They are not Visual Studio project presets.
+
+## Build and run
+
+From the repository root in the UCRT64 terminal:
+
+```sh
+cmake --preset ucrt64-gcc-ninja-debug
+cmake --build --preset build-debug
+./build/debug/opengl_app.exe
+```
+
+For an optimized build, use the release presets instead:
+
+```sh
+cmake --preset ucrt64-gcc-ninja-release
+cmake --build --preset build-release
+./build/release/opengl_app.exe
+```
+
+The build copies the shaders, resources, and meshes into the build output
+directory. CMake downloads the external dependencies during configuration, so
+the first configure can take longer than later builds.
+
+## Important: shader path
+
+Shader filenames in `src/application.hpp` currently use the absolute path
+`C:/Users/jaros/Desktop/voxel_streaming/shaders`. As written, the application
+will only find its shaders if the repository is located at that exact path.
+If you cloned it somewhere else, either move the checkout there or update those
+paths in the source before building. This restriction applies even though CMake
+also copies shaders beside the executable.
+
+## Troubleshooting
+
+- If CMake cannot find `gcc`, `g++`, or Ninja, open the MSYS2 UCRT64 terminal
+  and confirm the tools are on `PATH`.
+- If dependency fetching fails, check the network connection and rerun the
+  configure command.
+- If the window fails to open or shader compilation fails, check that the GPU
+  driver supports OpenGL 4.6 and that the shader path above is valid.
