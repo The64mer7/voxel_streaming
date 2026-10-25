@@ -37,16 +37,17 @@ struct sparse_tree_node
 {
     using child_offset_t = OffsetT;
     using child_mask_t = ChildmaskT;
+    using bitmask_t = bitmask<child_mask_t, ChildmaskN>;
     using data_t = DataT;
 
     constexpr static size_t max_children = MaxChildren;
     constexpr static size_t morton_length = std::bit_width(max_children - 1);
     constexpr static child_offset_t invalid_offset = std::numeric_limits<child_offset_t>::max();
 
-    data_t data;                                 /// your custom data, supports any POD
-    bitmask<child_mask_t, ChildmaskN> childmask; /// nth bit represents nth child presence
-    child_offset_t firstchild;                   /// offset into the first child in an array
-    child_offset_t parent;                       /// offset into the parent in an array
+    data_t data;               /// your custom data, supports any POD
+    bitmask_t childmask;       /// nth bit represents nth child presence
+    child_offset_t firstchild; /// offset into the first child in an array
+    child_offset_t parent;     /// offset into the parent in an array
 
     inline void reset_bit(size_t i) { childmask.reset(i); }
 

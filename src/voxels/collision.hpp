@@ -100,9 +100,18 @@ inline glm::vec3 get_barycentric(const glm::vec3& p, const glm::vec3& a, const g
     float d21 = glm::dot(v2, v1);
 
     float denom = d00 * d11 - d01 * d01;
-    float wb = (d11 * d20 - d01 * d21) / denom;
-    float wc = (d00 * d21 - d01 * d20) / denom;
+
+    const float EPSILON = 1e-8f;
+    if (std::abs(denom) < EPSILON)
+    {
+        return glm::vec3(0.0f);
+    }
+
+    float inv_denom = 1.0f / denom;
+    float wb = (d11 * d20 - d01 * d21) * inv_denom;
+    float wc = (d00 * d21 - d01 * d20) * inv_denom;
     float wa = 1.0f - wb - wc;
+
     return glm::vec3(wa, wb, wc);
 }
 

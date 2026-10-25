@@ -1,0 +1,36 @@
+#version 460 core 
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (r16f, binding = 0) uniform image2D u_ao;
+
+uniform sampler2D u_depth;
+uniform sampler2D u_normal;
+uniform mat4 u_inv_view;
+uniform mat4 u_inv_proj;
+uniform vec3 u_cam_pos;
+
+uniform float u_radius;
+uniform float u_bias;
+
+void create_ray(ivec2 uvi, out vec3 ro, out vec3 rd)
+{
+    ivec2 img_size = imageSize(u_ao);
+
+    vec2 ndc = (vec2(uvi) + 0.5f) / vec2(img_size) * 2.0f - 1.0f;
+    float aspect = float(img_size.x) / float(img_size.y);
+    
+    vec4 clip = u_inv_proj * vec4(ndc, -1.0f, 1.0f);
+    clip /= clip.w;
+    vec4 world_pos = u_inv_view * clip;
+
+    ro = u_cam_pos;
+    rd = normalize(world_pos.xyz - ro);
+}
+
+void main()
+{
+    ivec2 iuv = ivec2(gl_GlobalInvocationID.xy);
+    // TODO:
+    imageStore(u_ao, iuv, vec4(1.f, 0, 0, 0));
+}

@@ -16,12 +16,11 @@ public:
         allocate(data, size, flags);
     }
 
-    ~Ssbo()
+    void destroy()
     {
         if (buffer_id != 0)
-        {
             glDeleteBuffers(1, &buffer_id);
-        }
+        buffer_id = 0;
     }
 
     Ssbo(const Ssbo&) = delete;

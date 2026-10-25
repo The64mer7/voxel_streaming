@@ -177,6 +177,28 @@ void Application::update(float dt)
 
 void Application::cleanup()
 {
+    profiling_timer.destroy();
+
+    sp_raymarch.destroy();
+    sp_aabb.destroy();
+    sp_request_bitmask_gen.destroy();
+    sp_compact_requests.destroy();
+    sp_irradiance_raymarch.destroy();
+    sp_composite.destroy();
+    sp_probes_debug.destroy();
+    sp_probes_debug_ray.destroy();
+    sp_ssao.destroy();
+
+    request_buffers[0].destroy();
+    request_buffers[1].destroy();
+    request_bitmasks[0].destroy();
+    request_bitmasks[1].destroy();
+    request_node_bitmask.destroy();
+    compact_nodes[0].destroy();
+    compact_nodes[1].destroy();
+    compact_requests_indirect.destroy();
+    probes.destroy();
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

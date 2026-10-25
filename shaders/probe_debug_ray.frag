@@ -22,6 +22,6 @@ void main()
     vec2 uv = vec2(gl_FragCoord.xy) / u_screen_size;
     if (gl_FragCoord.z >= linear_to_screen_depth(texture(u_depth, uv).r))
         discard;
-
+        
     FragColor = vec4(v_color, 1.f);
 }

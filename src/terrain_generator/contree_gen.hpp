@@ -22,6 +22,9 @@
 
 #include <stb_image.h>
 
+using create_pfn = bool (*)(const glm::vec3& origin, float size, NodeT::data_t* data);
+using homogeneous_pfn = bool (*)(const glm::vec3& origin, float size);
+
 struct Texture2D
 {
     std::vector<stbi_uc> data;
@@ -328,6 +331,7 @@ class BallContree
 public:
     inline static glm::vec4 ball = glm::vec4{16, 16, 16, 4};
     inline static uint32_t color = 0xfff;
+    inline static uint32_t clear = 1;
 
     static bool create3d(const glm::vec3& origin, float size, NodeT::data_t* data)
     {
@@ -341,7 +345,7 @@ public:
         glm::vec3 normal = glm::dot(direction, direction) > 0.0f ? glm::normalize(direction)
                                                                  : glm::vec3(0.0f, 1.0f, 0.0f);
         uint32_t packed_normal = TerrainGen::pack_normal(normal);
-        *data = color;
+        *data = (clear == 1 ? 0 : (color | (packed_normal << 12)));
         return true;
     }
 
@@ -426,7 +430,6 @@ public:
         return glm::vec3(chunk_key) * chunk_size;
     }
 
-    using create_pfn = bool(const glm::vec3& origin, float size, NodeT::data_t* data);
     static bool create3d(const glm::vec3& origin, float size, NodeT::data_t* data)
     {
         glm::vec3 center = origin + size * 0.5f;
@@ -457,7 +460,6 @@ public:
 
         return true;
     }
-    using homogeneous_pfn = bool (*)(const glm::vec3& origin, float size);
     static bool homogeneous3d(const glm::vec3& origin, float size)
     {
         glm::vec2 minmax = TerrainGen::minmax_map(origin + size * 0.5f, glm::vec3(size * 0.5f));
@@ -509,14 +511,15 @@ public:
         return false;
     }
 
-    static bool create_3d_dfs(const glm::vec3& chunk_origin, float chunk_size, uint32_t max_depth)
+    static uint32_t create_3d_dfs(const glm::vec3& chunk_origin, float chunk_size,
+                                  uint32_t max_depth)
     {
         s_nodes.resize(1024 * 1024 * 20);
         s_allocator.create(s_nodes.size() / 64, 64);
         std::vector<uint32_t> out_pages;
         return create_3d_dfs_fixed_page<create_pfn, homogeneous_pfn>(
-            &s_allocator, 0, s_nodes.data(), TerrainContree::create3d,
-            TerrainContree::homogeneous3d, chunk_origin, chunk_size, max_depth, out_pages);
+            &s_allocator, s_nodes.data(), TerrainContree::create3d, TerrainContree::homogeneous3d,
+            chunk_origin, chunk_size, max_depth, out_pages);
     }
 
     static bool create_3d_dfs_mesh(const glm::vec3& chunk_origin, float chunk_size,

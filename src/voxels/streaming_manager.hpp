@@ -167,7 +167,7 @@ public:
 
             BuildInfo build_info = get_build_info(node_idx);
 
-            if (build_info.depth >= 5)
+            if (build_info.depth >= 4)
                 continue;
             min_page = glm::min(min_page, page_of_node(node_idx));
             max_page = glm::max(max_page, page_of_node(node_idx));

@@ -9,7 +9,7 @@
 class Timer
 {
 public:
-    ~Timer()
+    void destroy()
     {
         for (auto& node : queries)
         {

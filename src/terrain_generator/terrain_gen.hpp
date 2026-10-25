@@ -174,7 +174,7 @@ public:
 
         float random = glm::fract(float(rand_hash) / 1024.f);
         rand_hash = 551 * rand_hash + 6251;
-
+        random = 0;
         glm::uvec3 quantized = glm::uvec3(
             glm::min(glm::floor(scaled_normal + random), float(max_val)));
 

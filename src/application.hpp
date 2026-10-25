@@ -72,22 +72,34 @@ public:
         constexpr uint32_t num_nodes = 1024 * 1024 * 128;
         streaming_manager.init(num_nodes, 64);
         streaming_manager.cam = &camera;
-        if (!sp_raymarch.load_compute("shaders/raymarch.comp"))
+        // TODO:
+        if (!sp_raymarch.load_compute(
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/raymarch.comp"))
             exit(1);
-        if (!sp_irradiance_raymarch.load_compute("shaders/raymarch_irradiance.comp"))
+        if (!sp_irradiance_raymarch.load_compute(
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/raymarch_irradiance.comp"))
             exit(1);
-        if (!sp_aabb.load_graphics("shaders/aabb.vert", "shaders/aabb.frag"))
+        if (!sp_aabb.load_graphics("C:/Users/jaros/Desktop/voxel_streaming/shaders/aabb.vert",
+                                   "C:/Users/jaros/Desktop/voxel_streaming/shaders/aabb.frag"))
             exit(1);
-        if (!sp_probes_debug.load_graphics("shaders/probe_debug.vert", "shaders/probe_debug.frag"))
+        if (!sp_probes_debug.load_graphics(
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug.vert",
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug.frag"))
             exit(1);
-        if (!sp_probes_debug_ray.load_graphics("shaders/probe_debug_ray.vert",
-                                               "shaders/probe_debug_ray.frag"))
+        if (!sp_probes_debug_ray.load_graphics(
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug_ray.vert",
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug_ray.frag"))
             exit(1);
-        if (!sp_request_bitmask_gen.load_compute("shaders/request_bitmask_gen.comp"))
+        if (!sp_request_bitmask_gen.load_compute(
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/request_bitmask_gen.comp"))
             exit(1);
-        if (!sp_compact_requests.load_compute("shaders/compact_requests_fix.comp"))
+        if (!sp_compact_requests.load_compute(
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/compact_requests_fix.comp"))
             exit(1);
-        if (!sp_composite.load_compute("shaders/composite.comp"))
+        if (!sp_composite.load_compute(
+                "C:/Users/jaros/Desktop/voxel_streaming/shaders/composite.comp"))
+            exit(1);
+        if (!sp_ssao.load_compute("C:/Users/jaros/Desktop/voxel_streaming/shaders/ssao.comp"))
             exit(1);
 
         uint32_t w = 800;
@@ -103,6 +115,9 @@ public:
 
         depth_texture.create(GL_R16F);
         depth_texture.allocate(w, h);
+
+        ao_texture.create(GL_R16F);
+        ao_texture.allocate(w / 2, h / 2);
 
         normals_texture.create(GL_RGBA16_SNORM);
         normals_texture.allocate(w, h);
@@ -126,9 +141,21 @@ public:
         DispatchIndirectCommand cmd = {0, 0, 0};
         compact_requests_indirect.callocate<DispatchIndirectCommand>(&cmd, 1);
 
-        probes.callocate<Probe>(nullptr, 16 * 16 * 16, GL_DYNAMIC_STORAGE_BIT);
+        probes.callocate<Probe>(nullptr, glm::compMul(probe_counts), GL_DYNAMIC_STORAGE_BIT);
         probes.clear(0);
 
+        probes_colors.create(GL_RGBA8, GL_TEXTURE_2D_ARRAY);
+        probes_colors.allocate_3d(probe_resolution * probe_counts.x,
+                                  probe_resolution * probe_counts.y, probe_counts.z, GL_LINEAR);
+
+        glm::vec4 initial_color(0.f);
+        glClearTexImage(probes_colors.get_handle(), 0, GL_RGBA, GL_FLOAT, &initial_color);
+
+        probes_depths.create(GL_RG16F, GL_TEXTURE_2D_ARRAY);
+        probes_depths.allocate_3d(probe_resolution * probe_counts.x,
+                                  probe_resolution * probe_counts.y, probe_counts.z, GL_LINEAR);
+        float initial_depth = 0.f;
+        glClearTexImage(probes_depths.get_handle(), 0, GL_RED, GL_FLOAT, &initial_depth);
         for (int i = 0; i < 2; i++)
         {
             request_buffers[i].allocate(nullptr, (1024 * 1024 + 1) * sizeof(uint32_t),
@@ -161,26 +188,35 @@ public:
         glCreateVertexArrays(1, &empty_vao);
 
         setup_camera();
-
-        // MeshContree::create("meshes/sponza/sponza.obj");
-        MeshContree::create("meshes/satellite/satellite.obj");
-
-        auto root_aabb = MeshContree::get_bvh().nodes[0].aabb;
-        ame_vec3 bvh_size = ame_vec3_sub(&root_aabb.max, &root_aabb.min);
-
-        glm::vec3 bvh_origin = glm::make_vec3(&root_aabb.min.x);
-        float max_size = glm::max(bvh_size.x, glm::max(bvh_size.y, bvh_size.z));
-        // WorldContree::create_3d_dfs_mesh(bvh_origin, max_size, 4, MeshContree::get_bvh());
-        //   WorldContree::create_3d_dfs(glm::vec3(0), chunk_size, 4);
-
         WorldContree::s_nodes.resize(1024 * 1024 * 128);
         WorldContree::s_allocator.create(WorldContree::s_nodes.size() / 64, 64);
+        // MeshContree::create("meshes/satellite/satellite.obj");
+
         std::vector<uint32_t> pages;
-        printf("voxelize...\n");
-        create_3d_dfs_fixed_page(&WorldContree::s_allocator, 0, WorldContree::s_nodes.data(),
-                                 MeshContree::create3d, MeshContree::homogeneous3d, bvh_origin,
-                                 max_size, 3, pages);
+
+        if (false)
+        {
+            MeshContree::create("meshes/sponza/sponza.obj");
+
+            auto root_aabb = MeshContree::get_bvh().nodes[0].aabb;
+            ame_vec3 bvh_size = ame_vec3_sub(&root_aabb.max, &root_aabb.min);
+            glm::vec3 tree_origin = glm::make_vec3(&root_aabb.min.x);
+            float tree_scale = glm::max(bvh_size.x, glm::max(bvh_size.y, bvh_size.z));
+            printf("voxelize...\n");
+            uint32_t root_idx = create_3d_dfs_fixed_page(
+                &WorldContree::s_allocator, WorldContree::s_nodes.data(), MeshContree::create3d,
+                MeshContree::homogeneous3d, tree_origin, tree_scale, 4, pages);
+        }
+        else
+        {
+            printf("voxelize...\n");
+            create_3d_dfs_fixed_page(&WorldContree::s_allocator, WorldContree::s_nodes.data(),
+                                     TerrainContree::create3d, TerrainContree::homogeneous3d,
+                                     glm::vec3(0), 128.f, 4, pages);
+        }
         printf("done\n");
+
+        // WorldContree::create_3d_dfs(glm::vec3(0), chunk_size, 4);
         streaming_manager.upload_to_gpu();
     }
     glm::uvec4 data[3] = {glm::uvec4(UINT32_MAX), glm::uvec4(UINT32_MAX), glm::uvec4(UINT32_MAX)};
@@ -263,7 +299,7 @@ public:
             static std::unordered_set<uint32_t> nodes_set;
             nodes_set.clear();
             streamed_compact_nodes.clear();
-            streamed_compact_aabbs.clear();
+            // streamed_compact_aabbs.clear();
 
             for (int i = 0; i < streamed_nodes.size(); i++)
             {
@@ -274,7 +310,7 @@ public:
                     if (node != UINT32_MAX)
                     {
                         streamed_compact_nodes.push_back(node);
-                        streamed_compact_aabbs.push_back(streaming_manager.get_build_info(node));
+                        // streamed_compact_aabbs.push_back(streaming_manager.get_build_info(node));
                     }
                 }
             }
@@ -302,10 +338,10 @@ public:
             double t_mgr_end = glfwGetTime();
 
             printf("time:\n");
-            printf("  - Buffer Map/Readback: %fms\n", 1000 * (t_map_end - t0));
-            printf("  - Deduplication/AABBs: %fms\n", 1000 * (t_dedup_end - t_map_end));
-            printf("  - Manager (LRU/Subs):  %fms\n", 1000 * (t_mgr_end - t_mgr_start));
-            printf("  - Total Stream Time:   %fms\n", 1000 * (t_mgr_end - t_total_start));
+            printf("  - buffer readback: %fms\n", 1000 * (t_map_end - t0));
+            printf("  - deduplication: %fms\n", 1000 * (t_dedup_end - t_map_end));
+            printf("  - manager :  %fms\n", 1000 * (t_mgr_end - t_mgr_start));
+            printf("  - total stream time:   %fms\n", 1000 * (t_mgr_end - t_total_start));
         }
         stream = false;
     }
@@ -327,14 +363,27 @@ public:
             fences[slot] = nullptr;
 
             // old_stream(slot);
-            // stream_nodes();
+            stream_nodes();
         }
 
         sp_irradiance_raymarch.bind();
 
         sp_irradiance_raymarch.set_uint("u_frame_index", frame_index);
         sp_irradiance_raymarch.set_float("u_chunk_size", chunk_size);
+
+        sp_irradiance_raymarch.set_uvec3("u_probe_counts", probe_counts);
+        sp_irradiance_raymarch.set_int("u_probe_resolution", probe_resolution);
         sp_irradiance_raymarch.set_float("u_probe_spacing", probe_spacing);
+        sp_irradiance_raymarch.set_float("u_probe_hysteresis", probe_hysteresis);
+        sp_irradiance_raymarch.set_sampler("u_probe_depths_tex", probes_depths.get_handle(), 0,
+                                           GL_TEXTURE_2D_ARRAY);
+        sp_irradiance_raymarch.set_sampler("u_probe_colors_tex", probes_colors.get_handle(), 1,
+                                           GL_TEXTURE_2D_ARRAY);
+
+        sp_irradiance_raymarch.set_image("u_probe_depths", probes_depths.get_handle(), 0,
+                                         GL_READ_WRITE, probes_depths.get_internal_format());
+        sp_irradiance_raymarch.set_image("u_probe_colors", probes_colors.get_handle(), 1,
+                                         GL_READ_WRITE, probes_colors.get_internal_format());
 
         streaming_manager.bind_buffer(0);
         probes.bind_base(1);
@@ -437,6 +486,25 @@ public:
         }
 
         {
+            sp_ssao.bind();
+
+            sp_ssao.set_sampler("u_depth", depth_texture.get_handle(), 0, GL_TEXTURE_2D);
+            sp_ssao.set_sampler("u_normal", normals_texture.get_handle(), 1, GL_TEXTURE_2D);
+            sp_ssao.set_mat4("u_inv_proj", glm::inverse(camera.get_projection_matrix()));
+            sp_ssao.set_mat4("u_inv_view", glm::inverse(camera.get_view_matrix()));
+            sp_ssao.set_vec3("u_cam_pos", camera.get_position());
+
+            sp_ssao.set_float("u_radius", ssao_radius);
+            sp_ssao.set_float("u_bias", ssao_bias);
+
+            sp_ssao.set_image("u_ao", ao_texture.get_handle(), 0, GL_WRITE_ONLY, GL_R16F);
+
+            sp_ssao.dispatch_compute_grid(
+                {ao_texture.width(), ao_texture.height(), 1}, glm::uvec3(16, 16, 1),
+                GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+        }
+
+        {
             sp_composite.bind();
             sp_composite.set_uint("u_display_texture", display_texture);
             sp_composite.set_mat4("u_inv_view", glm::inverse(camera.get_view_matrix()));
@@ -445,23 +513,37 @@ public:
             sp_composite.set_uint("u_frame_index", frame_index);
             sp_composite.set_float("u_brightness", display_brightness);
             sp_composite.set_float("u_probe_spacing", probe_spacing);
+            sp_composite.set_uvec3("u_probe_counts", probe_counts);
+            sp_composite.set_int("u_probe_resolution", probe_resolution);
 
             probes.bind_base(0);
 
-            sp_composite.set_image("u_albedo", albedo_texture.get_handle(), 0, GL_READ_WRITE,
+            sp_composite.set_image("u_albedo", albedo_texture.get_handle(), 0, GL_READ_ONLY,
                                    albedo_texture.get_internal_format());
 
-            sp_composite.set_image("u_depth", depth_texture.get_handle(), 1, GL_READ_WRITE,
+            sp_composite.set_image("u_depth", depth_texture.get_handle(), 1, GL_READ_ONLY,
                                    depth_texture.get_internal_format());
 
-            sp_composite.set_image("u_normal", normals_texture.get_handle(), 2, GL_READ_WRITE,
+            sp_composite.set_image("u_normal", normals_texture.get_handle(), 2, GL_READ_ONLY,
                                    normals_texture.get_internal_format());
 
             sp_composite.set_image("u_final", final_texture.get_handle(), 3, GL_READ_WRITE,
                                    final_texture.get_internal_format());
 
+            sp_composite.set_image("u_probe_depths", probes_depths.get_handle(), 4, GL_READ_ONLY,
+                                   probes_depths.get_internal_format());
+            sp_composite.set_image("u_probe_colors", probes_colors.get_handle(), 5, GL_READ_ONLY,
+                                   probes_colors.get_internal_format());
+
             sp_composite.set_sampler("u_debug_texture", debug_texture.get_handle(), 0,
                                      GL_TEXTURE_2D);
+
+            sp_composite.set_sampler("u_probe_depths_tex", probes_depths.get_handle(), 1,
+                                     GL_TEXTURE_2D_ARRAY);
+            sp_composite.set_sampler("u_probe_colors_tex", probes_colors.get_handle(), 2,
+                                     GL_TEXTURE_2D_ARRAY);
+            sp_composite.set_sampler("u_ao", ao_texture.get_handle(), 3, GL_TEXTURE_2D);
+
             sp_composite.dispatch_compute_grid(
                 glm::uvec3(final_texture.width(), final_texture.height(), 1), glm::uvec3(16, 16, 1),
                 GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
@@ -522,9 +604,13 @@ public:
         if (ImGui::IsKeyDown(ImGuiKey_P))
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        if (ImGui::Begin("ddgi"))
+        if (ImGui::Begin("graphics settings"))
         {
             ImGui::SliderFloat("probe_spacing", &probe_spacing, 1.f, 16.f);
+            ImGui::SliderFloat("probe_hysteresis", &probe_hysteresis, 0.f, 1.f);
+
+            ImGui::SliderFloat("ssao_radius", &ssao_radius, 0, 1);
+            ImGui::SliderFloat("ssao_bias", &ssao_bias, 0, 1);
         }
         ImGui::End();
 
@@ -556,18 +642,21 @@ public:
         if (ImGui::Begin("tree"))
         {
             // debug_print_tree(WorldContree::s_nodes.data());
+            static int start_idx = 0;
+            ImGui::SliderInt("start_idx", &start_idx, 0, WorldContree::s_nodes.size() - 256);
             ImGui::Separator();
             for (int i = 0; i < 256; i++)
             {
-                auto& node = WorldContree::s_nodes[i];
+                auto& node = WorldContree::s_nodes[i + start_idx];
 
                 uint64_t combined_mask = static_cast<uint64_t>(node.childmask.mask[0]) |
                                          (static_cast<uint64_t>(node.childmask.mask[1]) << 32);
 
                 std::bitset<64> mask_bits(combined_mask);
 
-                ImGui::Text("Node [%d] | data: %u | parent: %u | firstchild: %u | mask: %s", i,
-                            node.data, node.parent, node.firstchild, mask_bits.to_string().c_str());
+                ImGui::Text("Node [%d] | data: %u | parent: %u | firstchild: %u | mask: %s",
+                            i + start_idx, node.data, node.parent, node.firstchild,
+                            mask_bits.to_string().c_str());
             }
         }
         ImGui::End();
@@ -585,6 +674,18 @@ public:
 
         if (ImGui::Begin("debug"))
         {
+            if (ImGui::Button("reload shaders"))
+            {
+                sp_raymarch.reload();
+                sp_aabb.reload();
+                sp_request_bitmask_gen.reload();
+                sp_compact_requests.reload();
+                sp_irradiance_raymarch.reload();
+                sp_composite.reload();
+                sp_probes_debug.reload();
+                sp_probes_debug_ray.reload();
+                sp_ssao.reload();
+            }
             ImGui::SliderFloat2("minmax debug draw aabb", glm::value_ptr(draw_aabb_minmax_size),
                                 0.f, 32.f);
 
@@ -596,7 +697,7 @@ public:
 
             static float d = 0.f;
             static uint32_t brush_color = 0xfff;
-            if (is_viewport_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            if (is_viewport_hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left))
             {
 
                 if (glm::all(glm::greaterThanEqual(mouse_pos, glm::vec2(0))) &&
@@ -608,12 +709,11 @@ public:
                                          GL_FLOAT, sizeof(d), &d);
                     ImGui::Text("depth: %f", d);
                 }
+
                 uint32_t r = rand() % 15 + 1;
                 uint32_t g = rand() % 15 + 1;
                 uint32_t b = rand() % 15 + 1;
                 brush_color = r | (g << 4) | (b << 8);
-                BallContree::color = 0;
-
                 auto create_ray = [&](glm::vec3& ro, glm::vec3& rd)
                 {
                     glm::vec2 img_size = {depth_texture.width(), depth_texture.height()};
@@ -642,13 +742,23 @@ public:
 
                 aabbs.clear();
 
-                BallContree::color = brush_color;
-                BallContree::color = 0;
+                BallContree::color = 0x00fu;
+                BallContree::clear = input.is_key_held(GLFW_KEY_E);
+
                 uint32_t before_pages = WorldContree::s_allocator.free_pages_count();
-                glm::uvec2 minmax_offset = modify_3d_dfs_fixed_page(
-                    &WorldContree::s_allocator, 0, WorldContree::s_nodes.data(),
-                    BallContree::create3d, BallContree::homogeneous3d, glm::vec3(0.f), 128.f, 5,
-                    pages, aabbs);
+
+                Contree3DModifier modifier;
+                modifier.out_minmax = glm::uvec2(UINT32_MAX, 0);
+                modifier.allocator = &WorldContree::s_allocator;
+                modifier.nodes = WorldContree::s_nodes.data();
+                modifier.num_nodes = WorldContree::s_nodes.size();
+                modifier.modify_fn = BallContree::create3d;
+                modifier.modify_homogeneous_fn = BallContree::homogeneous3d;
+                modifier.max_depth = 4;
+                modifier.aabbs = &aabbs;
+                modifier.erase = BallContree::clear;
+                modifier.modify_3d_dfs_iter3(glm::vec3(0), 128, 0, 0);
+
                 uint32_t after_pages = WorldContree::s_allocator.free_pages_count();
 
                 if (after_pages > before_pages)
@@ -657,7 +767,7 @@ public:
                     printf("edit alloc: %u pages\n", before_pages - after_pages);
 
                 profiling_timer.begin_gpu("upload_edit");
-                streaming_manager.upload_to_gpu(minmax_offset.x, minmax_offset.y);
+                streaming_manager.upload_to_gpu(modifier.out_minmax.x, modifier.out_minmax.y);
                 profiling_timer.end_gpu("upload_edit");
             }
 
@@ -723,6 +833,8 @@ public:
 
         if (input.is_button_held(GLFW_MOUSE_BUTTON_RIGHT))
             camera.rotate(input.get_mouse_dx() * sensitivity, input.get_mouse_dy() * sensitivity);
+        if (input.is_key_clicked(GLFW_KEY_Q))
+            streaming_manager.upload_to_gpu();
     }
 
     void setup_camera()
@@ -779,7 +891,10 @@ public:
 
         glBindVertexArray(empty_vao);
         glDrawArraysInstanced(GL_TRIANGLES, 0, 6, 4096);
+    }
 
+    void draw_probe_rays()
+    {
         sp_probes_debug_ray.bind();
         probes.bind_base(0);
 
@@ -826,21 +941,26 @@ public:
     Shader sp_composite;
     Shader sp_probes_debug;
     Shader sp_probes_debug_ray;
+    Shader sp_ssao;
 
     Texture request_imgs[3];
     Ssbo request_node_bitmask;
     Ssbo compact_nodes[2];
     Ssbo compact_requests_indirect;
 
-    inline static const char* g_buffer_names[] = {"final",    "albedo",       "depth",     "normal",
-                                                  "indirect", "subdiv_depth", "iterations"};
+    inline static const char* g_buffer_names[] = {
+        "final",        "albedo",     "depth",       "normal",      "indirect",
+        "subdiv_depth", "iterations", "probe_depth", "probe_color", "ao"};
     Texture albedo_texture;
     Texture depth_texture;
     Texture normals_texture;
     Texture final_texture;
     Texture debug_texture;
+    Texture ao_texture;
 
     Ssbo probes;
+    Texture probes_depths;
+    Texture probes_colors;
 
     uint32_t fbo = 0;
     uint32_t rbo = 0;
@@ -854,12 +974,12 @@ public:
     float display_brightness = 1.f;
     float viewport_scale = 1.5f;
 
-    float probe_spacing = 8.f;
+    float ssao_radius = 0.1f;
+    float ssao_bias = 0.1f;
+
+    float probe_spacing = 16.f;
     float probe_point_size = 3.f;
-    inline static constexpr uint32_t DISPLAY_FINAL = 0;
-    inline static constexpr uint32_t DISPLAY_ALBEDO = 1;
-    inline static constexpr uint32_t DISPLAY_DEPTH = 2;
-    inline static constexpr uint32_t DISPLAY_NORMAL = 3;
-    inline static constexpr uint32_t DISPLAY_INDIRECT = 4;
-    inline static constexpr uint32_t DISPLAY_SUBDIV_DEPTH = 5;
+    float probe_hysteresis = 0.95f;
+    glm::ivec3 probe_counts = {32, 32, 32};
+    int probe_resolution = 16;
 };

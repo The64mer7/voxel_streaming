@@ -26,12 +26,11 @@ public:
 
     Shader() = default;
 
-    ~Shader()
+    void destroy()
     {
         if (program_id != 0)
-        {
             glDeleteProgram(program_id);
-        }
+        program_id = 0;
     }
 
     Shader(const Shader&) = delete;
@@ -41,6 +40,11 @@ public:
     {
         program_id = other.program_id;
         other.program_id = 0;
+        m_vertex_path = std::move(other.m_vertex_path);
+        m_fragment_path = std::move(other.m_fragment_path);
+        m_compute_path = std::move(other.m_compute_path);
+        m_is_compute = other.m_is_compute;
+        uniform_location_cache = std::move(other.uniform_location_cache);
     }
 
     Shader& operator=(Shader&& other) noexcept
@@ -51,12 +55,31 @@ public:
                 glDeleteProgram(program_id);
             program_id = other.program_id;
             other.program_id = 0;
+            m_vertex_path = std::move(other.m_vertex_path);
+            m_fragment_path = std::move(other.m_fragment_path);
+            m_compute_path = std::move(other.m_compute_path);
+            m_is_compute = other.m_is_compute;
+            uniform_location_cache = std::move(other.uniform_location_cache);
         }
         return *this;
     }
 
+    bool reload()
+    {
+        if (m_is_compute)
+        {
+            return reload_compute();
+        }
+        return reload_graphics();
+    }
+
     bool load_graphics(const std::string& vertex_path, const std::string& fragment_path)
     {
+        uniform_location_cache.clear();
+        m_vertex_path = vertex_path;
+        m_fragment_path = fragment_path;
+        m_is_compute = false;
+
         std::string vertex_code = read_file(vertex_path);
         std::string fragment_code = read_file(fragment_path);
 
@@ -67,23 +90,45 @@ public:
         unsigned int fragment = compile_shader(fragment_code, GL_FRAGMENT_SHADER);
 
         if (!vertex || !fragment)
+        {
+            if (vertex)
+                glDeleteShader(vertex);
+            if (fragment)
+                glDeleteShader(fragment);
             return false;
+        }
 
-        program_id = glCreateProgram();
-        glAttachShader(program_id, vertex);
-        glAttachShader(program_id, fragment);
-        glLinkProgram(program_id);
+        unsigned int new_program = glCreateProgram();
+        glAttachShader(new_program, vertex);
+        glAttachShader(new_program, fragment);
+        glLinkProgram(new_program);
 
-        bool success = check_compile_errors(program_id, "PROGRAM");
+        bool success = check_compile_errors(new_program, "PROGRAM");
 
         glDeleteShader(vertex);
         glDeleteShader(fragment);
+
+        if (success)
+        {
+            if (program_id != 0)
+                glDeleteProgram(program_id);
+            program_id = new_program;
+            uniform_location_cache.clear();
+        }
+        else
+        {
+            glDeleteProgram(new_program);
+        }
 
         return success;
     }
 
     bool load_compute(const std::string& compute_path)
     {
+        uniform_location_cache.clear();
+        m_compute_path = compute_path;
+        m_is_compute = true;
+
         std::string compute_code = read_file(compute_path);
         if (compute_code.empty())
             return false;
@@ -92,12 +137,24 @@ public:
         if (!compute)
             return false;
 
-        program_id = glCreateProgram();
-        glAttachShader(program_id, compute);
-        glLinkProgram(program_id);
+        unsigned int new_program = glCreateProgram();
+        glAttachShader(new_program, compute);
+        glLinkProgram(new_program);
 
-        bool success = check_compile_errors(program_id, "PROGRAM");
+        bool success = check_compile_errors(new_program, "PROGRAM");
         glDeleteShader(compute);
+
+        if (success)
+        {
+            if (program_id != 0)
+                glDeleteProgram(program_id);
+            program_id = new_program;
+            uniform_location_cache.clear();
+        }
+        else
+        {
+            glDeleteProgram(new_program);
+        }
 
         return success;
     }
@@ -229,7 +286,15 @@ public:
     }
 
 private:
+    bool reload_compute() { return load_compute(m_compute_path); }
+
+    bool reload_graphics() { return load_graphics(m_vertex_path, m_fragment_path); }
+
     mutable std::unordered_map<std::string, int> uniform_location_cache;
+    std::string m_vertex_path;
+    std::string m_fragment_path;
+    std::string m_compute_path;
+    bool m_is_compute = false;
 
     int get_uniform_location(const std::string& name) const
     {

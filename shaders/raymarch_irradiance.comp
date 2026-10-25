@@ -8,6 +8,44 @@
 uniform uint u_frame_index;
 uniform float u_chunk_size;
 uniform float u_probe_spacing;
+uniform float u_probe_hysteresis;
+uniform uvec3 u_probe_counts;
+uniform int u_probe_resolution;
+layout(rg16f, binding = 0) uniform image2DArray u_probe_depths;
+layout(rgba8, binding = 1) uniform image2DArray u_probe_colors;
+uniform sampler2DArray u_probe_depths_tex;
+uniform sampler2DArray u_probe_colors_tex;
+
+// octahedral mapping functions from: https://gist.github.com/pyalot/cc7c3e5f144fb825d626
+#define sectorize(value) step(0.0, (value))*2.0-1.0
+#define sum(value) dot(clamp((value), 1.0, 1.0), (value))
+
+vec2 normalToUvRectOct(vec3 normal)
+{
+    normal /= sum(abs(normal));
+    if(normal.y > 0.0){
+        return normal.xz*0.5+0.5;
+    }
+    else{
+        vec2 suv = sectorize(normal.xz);
+        vec2 uv = suv-suv*abs(normal.zx);
+        return uv*0.5+0.5;
+    }
+}
+
+vec3 uvToNormalRectOct(vec2 uv)
+{
+    uv = uv*2.0-1.0;
+    vec2 auv = abs(uv);
+    vec2 suv = sectorize(uv);
+    float l = sum(auv);
+
+    if(l > 1.0){
+        uv = (1.0-auv.ts)*suv;
+    }
+
+    return normalize(vec3(uv.s,1.0-l,uv.t));
+}
 
 struct TreeNode
 {
@@ -26,7 +64,9 @@ layout(std430, binding = 0) buffer TreeNodes
 struct Probe
 {
     vec3 indirect;
+    float depth_moment;
     vec3 last_ray_dir;
+    float depth_moment_sq;
 };
 
 layout(std430, binding = 1) buffer IrradianceProbes
@@ -421,20 +461,101 @@ vec3 trilinear_interpolate(
     return mix(y0, y1, f.z);
 }
 
+float get_depth_moment(Probe probe, vec3 n)
+{
+    return probe.depth_moment;
+}
+
+float get_depth_moment_sq(Probe probe, vec3 n)
+{
+    return probe.depth_moment_sq;
+}
+
+float get_variance(float x, float x_sq)
+{
+    return x_sq - x*x;
+}
+
+float compute_probe_visibility(vec2 depth_moments, vec3 probe_wp, vec3 wp, vec3 normal)
+{
+    float surface_to_probe_dist = distance(wp, probe_wp);
+
+    float depth_moment = depth_moments.x;
+    float depth_moment_sq = depth_moments.y;
+
+    float depth_variance = max(0.001f, get_variance(depth_moment, depth_moment_sq));
+            
+    float visibility_certainty = depth_variance / (depth_variance + pow(depth_moment - surface_to_probe_dist, 2.f));
+    float visibility_weight = surface_to_probe_dist > depth_moment ? visibility_certainty : 1.f;
+    return visibility_weight;
+}
+
+vec2 uv_to_atlas_uv(vec2 uv_norm, vec2 atlas_offset, vec2 atlas_size)
+{
+    vec2 uv = (uv_norm + atlas_offset) / atlas_size;
+    return uv;
+}
+
+
+void read_probe_data(ivec3 probe_coord, vec3 normal, out vec2 moments, out vec3 indirect)
+{
+    vec2 uv = normalToUvRectOct(normal);
+    
+    ivec2 local_iuv = ivec2(uv * float(u_probe_resolution));
+    ivec2 global_iuv = ivec2(probe_coord.xy) * u_probe_resolution;
+    ivec2 iuv = global_iuv + local_iuv;
+    int layer = probe_coord.z;
+
+    vec2 atlas_uv = uv_to_atlas_uv(uv, vec2(probe_coord.xy), vec2(u_probe_counts.xy));
+    moments = texture(u_probe_depths_tex, vec3(atlas_uv, layer)).xy;
+    indirect = texture(u_probe_colors_tex, vec3(atlas_uv, layer)).rgb;
+    // moments = imageLoad(u_probe_depths, ivec3(iuv, layer)).xy;
+    // indirect = imageLoad(u_probe_colors, ivec3(iuv, layer)).rgb;
+}
+
 vec3 sample_indirect_light(vec3 wp, vec3 normal)
 {
-    uvec3 probe_coord00 = coord_from_world(wp, u_probe_spacing);
-    if (all(lessThan(probe_coord00, uvec3(15))))
+    ivec3 probe_coord00 = coord_from_world(wp, u_probe_spacing);
+    if (all(lessThan(probe_coord00, ivec3(15))))
     {
         vec3 probe_colors[8];
+        float probe_weights[8];
+        float probe_weights_sum = 0.f;
+
+        vec3 f = fract(wp / u_probe_spacing);
         for (int i = 0; i < 8; i++)
         {
-            uint probe_i = flatten_index(ivec3(probe_coord00 + ivec3(i % 2, (i / 2) % 2, i/4)), 16);
+            ivec3 offset_coord = ivec3(i % 2, (i / 2) % 2, i/4);
+            ivec3 probe_coord = probe_coord00 + offset_coord;
+            uint probe_i = flatten_index(probe_coord, 16);
             Probe probe = probes.probes[probe_i];
-            probe_colors[i] = probe.indirect;
+
+            vec2 moments;
+            read_probe_data(probe_coord, normal, moments, probe_colors[i]);
+            vec3 corner = vec3(offset_coord);
+            vec3 spatial_weights = mix(vec3(1.f) - f, f, corner);
+            float spatial_weight = spatial_weights.x * spatial_weights.y * spatial_weights.z;
+            
+            vec3 probe_wp = vec3(probe_coord) * u_probe_spacing;
+            float visibility_weight = compute_probe_visibility(moments, probe_wp, wp, normal);
+
+            float combined_weight = visibility_weight * spatial_weight;
+
+            probe_weights[i] = combined_weight;
+            probe_weights_sum += combined_weight;
+        }
+
+        if (probe_weights_sum <= 0.0001f)
+            return vec3(0.f);
+        
+        vec3 indirect_light = vec3(0);
+        // normalization and accumulation
+        for(int i = 0; i < 8; i++)
+        {
+            probe_weights[i] /= probe_weights_sum;
+            indirect_light += probe_colors[i] * probe_weights[i];
         }
     
-        vec3 indirect_light = trilinear_interpolate(probe_colors, vec3(fract(wp/u_probe_spacing)));
         return indirect_light;
     }
     return vec3(0.f);
@@ -505,21 +626,45 @@ vec3 sample_skybox(vec3 rd)
     return mix(horizon_color, zenith_color, t);
 }
 
+void write_probe_data(ivec3 probe_coord, vec3 normal, float depth, vec3 color, float hysteresis)
+{
+    vec2 uv = normalToUvRectOct(normal);
+    
+    ivec2 local_iuv = ivec2(uv * float(u_probe_resolution));
+    ivec2 global_iuv = ivec2(probe_coord.xy) * u_probe_resolution;
+    ivec2 iuv = global_iuv + local_iuv;
+    int layer = probe_coord.z;
+
+    vec2 moments = vec2(depth, depth * depth);
+    vec2 old_moments = imageLoad(u_probe_depths, ivec3(iuv, layer)).xy;
+    vec3 old_color = imageLoad(u_probe_colors, ivec3(iuv, layer)).rgb;
+
+    vec2 new_moments = mix(moments, old_moments, hysteresis);
+    vec3 new_color = mix(color, old_color, hysteresis);
+    imageStore(u_probe_depths, ivec3(iuv, layer), vec4(new_moments, 0, 0));
+    imageStore(u_probe_colors, ivec3(iuv, layer), vec4(new_color, 0));
+}
+
 void main()
 {
-    float pi = 3.14159;
-    float probe_yaw = 2 * pi * hash_u4_f1n(uvec4(uvec3(gl_GlobalInvocationID.xyz * 1655 + 165), u_frame_index));
-    float probe_pitch = 2 * pi * hash_u4_f1n(uvec4(uvec3(gl_GlobalInvocationID.zxy * 5615 + 1621), u_frame_index));
+    for(int i = 0; i < 1; i++)
+    {
 
-    vec3 probe_o = u_probe_spacing * vec3(gl_GlobalInvocationID.xyz);
+    float pi = 3.14159;
+    uvec3 probe_coord = gl_GlobalInvocationID.xyz;
+    float probe_yaw = 2 * pi * hash_u4_f1n(uvec4(uvec3(probe_coord * 1655 + 165), u_frame_index + i));
+    float probe_pitch = 2 * pi * hash_u4_f1n(uvec4(uvec3(probe_coord * 5615 + 1621), u_frame_index + i));
+
+    vec3 probe_o = u_probe_spacing * vec3(probe_coord);
     vec3 probe_rd = yaw_pitch_to_dir(probe_yaw, probe_pitch);
 
     raymarch_hit hit = raymarch_tree(u_chunk_size, probe_o, probe_rd);
 
     uint index = global_invocation_index();
     Probe probe = probes.probes[index];
-    float hysteresis = 0.95f;
 
+    float depth = hit.t;
+    vec3 reflected_light = vec3(0);
     if (hit.t > 0.0)
     {
         vec3 wp = pos_along_ray(probe_o, probe_rd, hit.t);
@@ -534,18 +679,29 @@ void main()
         vec3 indirect_light = sample_indirect_light(wp, hit_normal);
         vec3 direct_light = sample_direct_light(wp, hit_normal) * brdf;
         
-        vec3 reflected_light = indirect_light * (hit_albedo / 3.14159) + direct_light;
+        reflected_light = indirect_light * (hit_albedo / 3.14159) + direct_light;
 
-        probe.indirect = mix(reflected_light, probe.indirect, hysteresis);
-        probe.last_ray_dir = probe_rd * hit.t;
+        probe.indirect = mix(reflected_light, probe.indirect, u_probe_hysteresis);
+        probe.last_ray_dir = probe_rd * depth;
+        
+        probe.depth_moment = mix(depth, probe.depth_moment, u_probe_hysteresis);
+        probe.depth_moment_sq = mix(pow(depth, 2.f), probe.depth_moment_sq, u_probe_hysteresis);
+
+    
     }
-    else if (hit.t < 0.f)
+    else
     {
         vec3 sky_color = sample_skybox(probe_rd);
-
-        probe.indirect = mix(sky_color, probe.indirect, hysteresis);
+        sky_color = vec3(1);
+        reflected_light = sky_color;
+        probe.indirect = mix(sky_color, probe.indirect, u_probe_hysteresis);
         probe.last_ray_dir = probe_rd * 1000.0;
     }
 
+    write_probe_data(ivec3(probe_coord), probe_rd, depth, reflected_light, u_probe_hysteresis);
+
+
     probes.probes[index] = probe;
+    }
+
 }
