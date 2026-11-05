@@ -49,17 +49,27 @@ struct sparse_tree_node
     child_offset_t firstchild; /// offset into the first child in an array
     child_offset_t parent;     /// offset into the parent in an array
 
-    inline void reset_bit(size_t i) { childmask.reset(i); }
+    inline void make_leaf(data_t data, child_offset_t parent)
+    {
+        this->data = data;
+        this->parent = parent;
+        unlink_children();
+        firstchild = invalid_offset;
+    }
 
-    inline void set_bit(size_t i) { childmask.set(i); }
+    bool is_leaf() { return firstchild == invalid_offset; }
 
-    inline bool get_bit(size_t i) { return childmask.get(i); }
+    inline void unlink_child(size_t i) { childmask.reset(i); }
 
-    inline void clear_bits() { childmask.clear(); }
+    inline void set_child(size_t i) { childmask.set(i); }
+
+    inline bool has_child(size_t i) { return childmask.get(i); }
+
+    inline void unlink_children() { childmask.clear(); }
 
     inline size_t child_count() { return childmask.popcount(); }
 
-    inline size_t find_lsb(size_t start_i) { return childmask.find_lsb(start_i); }
+    inline size_t find_lsb_child(size_t start_i) { return childmask.find_lsb(start_i); }
 };
 
 template <typename NodeT>
@@ -128,4 +138,4 @@ template <typename DataT>
 using quadtree_node_o8u = sparse_tree_node<DataT, uint8_t, 1, uint8_t, 4>;
 } // namespace svo
 
-using NodeT = svo::contree_node<uint32_t>;
+using contree_node = svo::contree_node<uint32_t>;

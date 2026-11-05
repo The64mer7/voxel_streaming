@@ -180,6 +180,15 @@ public:
         glMemoryBarrier(barrier_flags);
     }
 
+    void dispatch_compute_grid(const glm::uvec2& total_size, const glm::uvec2& group_size,
+                               GLenum barrier_flags)
+    {
+        bind();
+        glm::uvec2 groups = (total_size + group_size - 1u) / group_size;
+        glDispatchCompute(groups.x, groups.y, 1);
+        glMemoryBarrier(barrier_flags);
+    }
+
     void dispatch_compute(const glm::uvec3& groups,
                           GLenum barrier_flags = GL_SHADER_STORAGE_BARRIER_BIT) const
     {
@@ -279,9 +288,9 @@ public:
     }
 
     void set_image(const std::string& name, GLuint texture, uint32_t image_unit, GLenum access,
-                   GLenum format = GL_RGBA8) const
+                   GLenum format, int lod_level = 0) const
     {
-        glBindImageTexture(image_unit, texture, 0, GL_FALSE, 0, access, format);
+        glBindImageTexture(image_unit, texture, lod_level, GL_FALSE, 0, access, format);
         glUniform1i(get_uniform_location(name), static_cast<int>(image_unit));
     }
 

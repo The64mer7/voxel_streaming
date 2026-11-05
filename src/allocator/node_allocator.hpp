@@ -6,9 +6,9 @@
 class NodeAllocator
 {
 public:
-    void create(uint32_t num_pages, uint32_t alloc_size)
+    void create(uint32_t num_pages, uint32_t alloc_size, uint32_t num_freelists)
     {
-        m_allocator.set_page_count(num_pages);
+        m_allocator.set_page_count(num_pages, num_freelists);
         m_alloc_size = alloc_size;
     }
 

@@ -1,0 +1,127 @@
+#version 460 core 
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+uniform sampler2D u_hzb;
+
+struct raymarch_hit
+{
+    bool hit = false;
+    vec2 pos;
+};
+
+ivec2 texels_count_at_lod(int lod)
+{
+    return imageSize(u_hzb) / (1 << lod);
+}
+
+vec2 texel_size_at_lod(int lod)
+{
+    return 1.f / texels_count_at_lod(lod);
+}
+
+vec2 fetch_depthf(vec2 uv, int lod)
+{
+    vec2 minmax = textureLod(u_hzb, uv, lod).xy;
+}
+
+vec3 get_safe_ird(vec3 rd)
+{
+    vec3 safe_sign = mix(vec3(-1.0), vec3(1.0), greaterThanEqual(rd, vec3(0.0)));
+    vec3 safe_abs_rd = max(vec3(1e-5), abs(rd));
+    return safe_sign / safe_abs_rd;
+}
+
+bool in_range(vec2 uv, vec2 minmax)
+{
+    return all(greaterThanEqual(uv, minmax.xx)) && all(lessThan(uv, minmax.yy));
+}
+
+bool in_range(float u, vec2 minmax)
+{
+    return u >= minmax.x && u < minmax.y;
+}
+
+vec2 quantize_uv(vec2 uv, int lod)
+{
+    vec2 texel_size = texel_size_at_lod(lod);
+    return floor(uv / texel_size) * texel_size;
+}
+
+raymarch_hit raymarch_depth_buffer(vec3 pos, vec3 rd)
+{
+    raymarch_hit hit;
+    hit.hit = false;
+    int max_lod = textureQueryLevels(u_hzb) - 1;
+    int lod = max_lod;
+
+    vec3 ird = get_safe_ird(rd);
+    vec3 srd = sign(ird);
+    vec3 pos_rd = step(vec3(0), ird);
+    vec2 scene_minmax = fetch_depthf(pos.x, lod);
+
+    for (int i = 0; i < 64; i++)
+    {
+        vec2 minmax = fetch_depthf(pos.x, lod);
+        vec2 quantized_uv = quantize_uv(pos.xy, lod);
+        vec2 cell_size = texel_size_at_lod(lod);
+
+        if (!in_range(pos.xy, vec2(0, 1)) || !in_range(pos.z, scene_minmax))
+        {
+            hit.hit = false;
+            break;
+        }
+        if (in_range(pos.z, minmax)) // inside cell, must descend
+        {
+            if (lod <= 0)
+            {
+                hit.hit = true;
+                hit.pos = pos;
+                break;
+            }
+            lod--;
+            continue;
+        }
+
+        // check closest cell
+        vec3 cell_pos;
+        cell_pos.xy = quantized_uv + cell_size * pos_rd.xy;
+        cell_pos.z = rd.z > 0 ? minmax.x : minmax.y;
+
+        vec3 side_dist = (cell_pos - pos) * ird;
+        float mindist = compMin(side_dist);
+        if (side_dist.z < 0)
+        {
+            mindist = compMin(side_dist.xy);
+        }
+        bool is_horizontal_hit = mindist != side_dist.z;
+
+        if (is_horizontal_hit) // hit horizontally
+        {
+            if (lod == max_lod)
+            {
+                hit.hit = false;
+                break;
+            }
+            lod++;
+        }
+        else // hit vertically
+        {
+            if (lod <= 0)
+            {
+                hit.hit = true;
+                pos = pos + rd * (mindist + 0.001f);
+                hit.pos = pos;
+                break;
+            }
+        }
+
+        pos = pos + rd * (mindist + 0.001f);
+    }
+    return hit;
+}
+
+void main()
+{
+
+}

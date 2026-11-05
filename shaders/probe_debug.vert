@@ -8,7 +8,7 @@ uniform float u_point_size;
 
 struct Probe
 {
-    vec3 indirect;
+    vec3 offset;
     float depth_moment;
     vec3 last_ray_dir;
     float depth_moment_sq;
@@ -39,10 +39,11 @@ void main()
     int x = instance_id % 16;
 
     Probe probe = probes.probes[instance_id];
-    v_color = probe.indirect;
+    v_color = probe.offset/u_probe_spacing;
     v_color = vec3((probe.depth_moment_sq - pow(probe.depth_moment, 2.f)));
+    v_color = vec3(probe.depth_moment)/16.f;
     vec3 grid_pos = vec3(float(x), float(y), float(z)) * u_probe_spacing;
-    vec4 clip_center = u_proj * u_view * vec4(grid_pos, 1.0);
+    vec4 clip_center = u_proj * u_view * vec4(grid_pos + probe.offset, 1.0);
     clip_center.xy += vertex_position * u_point_size * (2.0 / u_screen_size) * clip_center.w;
 
     gl_Position = clip_center;

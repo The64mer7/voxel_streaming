@@ -64,8 +64,10 @@ void Application::init()
 void Application::run()
 {
     float last_time = (float)glfwGetTime();
+    bool fps_limit_active = false;
     while (is_running && !glfwWindowShouldClose(window))
     {
+        const auto frame_start = std::chrono::steady_clock::now();
         float current_time = (float)glfwGetTime();
         float delta_time = current_time - last_time;
         last_time = current_time;
@@ -128,6 +130,12 @@ void Application::run()
         ImGui::End();
 
         update(delta_time);
+        const bool fps_limit_enabled = target_fps > 0;
+        if (fps_limit_enabled != fps_limit_active)
+        {
+            glfwSwapInterval(fps_limit_enabled ? 0 : 1);
+            fps_limit_active = fps_limit_enabled;
+        }
 
         ImGui::Render();
 
@@ -148,6 +156,13 @@ void Application::run()
         }
 
         glfwSwapBuffers(window);
+
+        if (fps_limit_enabled)
+        {
+            const auto frame_duration =
+                std::chrono::duration<double>(1.0 / static_cast<double>(target_fps));
+            std::this_thread::sleep_until(frame_start + frame_duration);
+        }
     }
 }
 
@@ -187,7 +202,7 @@ void Application::cleanup()
     sp_composite.destroy();
     sp_probes_debug.destroy();
     sp_probes_debug_ray.destroy();
-    sp_ssao.destroy();
+    sp_ao.destroy();
 
     request_buffers[0].destroy();
     request_buffers[1].destroy();

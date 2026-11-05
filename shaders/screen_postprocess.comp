@@ -1,0 +1,20 @@
+#version 460 core
+
+layout(rgba16f, binding = 0) uniform image2D u_screen_texture;
+layout(rgba16f, binding = 1) uniform image2D u_autoexposure;
+uniform float u_exposure;
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main()
+{
+    vec4 mean_color = imageLoad(u_autoexposure, ivec2(0));
+    float luminance = max(mean_color.x, max(mean_color.y, mean_color.z));
+    float exposure = 0.1/(luminance + 0.01f);
+
+    ivec2 iuv = ivec2(gl_GlobalInvocationID.xy);
+    vec4 hdr = imageLoad(u_screen_texture, iuv);
+    vec4 ldr = exposure * hdr / (vec4(1) + exposure * hdr);
+    ldr = u_exposure * hdr / (vec4(1) + u_exposure * hdr);
+    imageStore(u_screen_texture, iuv, vec4(ldr.rgb, 1));
+}

@@ -18,16 +18,18 @@ layout(std430, binding = 0) buffer IrradianceProbes
 layout(rgba8, binding = 0) uniform image2D u_albedo;
 layout(r16f, binding = 1) uniform image2D u_depth;
 layout(rgba16_snorm, binding = 2) uniform image2D u_normal;
+layout(rgba16, binding = 3) uniform image2D u_final;
+layout(rgba16f, binding = 4) uniform image2D u_indirect_texture;
 
-layout(rg16f, binding = 3) uniform image2DArray u_probe_depths;
-layout(rgba8, binding = 4) uniform image2DArray u_probe_colors;
+layout(rg16f, binding = 5) uniform image2DArray u_probe_depths;
+layout(rgba16f, binding = 6) uniform image2DArray u_probe_colors;
 uniform sampler2DArray u_probe_depths_tex;
 uniform sampler2DArray u_probe_colors_tex;
 
 uniform sampler2D u_debug_texture;
 uniform sampler2D u_ao;
+uniform sampler2D u_hzb;
 
-layout(rgba8, binding = 3) uniform image2D u_final;
 
 uniform uint u_display_texture;
 uniform vec3 u_cam_pos;
@@ -37,6 +39,8 @@ uniform float u_brightness;
 uniform float u_probe_spacing;
 uniform uvec3 u_probe_counts;
 uniform int u_probe_resolution;
+uniform int u_ddgi;
+uniform uint u_frame_index;
 
 // octahedral mapping functions from: https://gist.github.com/pyalot/cc7c3e5f144fb825d626
 #define sectorize(value) step(0.0, (value))*2.0-1.0
@@ -93,12 +97,18 @@ void create_ray(ivec2 uvi, out vec3 ro, out vec3 rd)
 #define DISPLAY_ALBEDO 1
 #define DISPLAY_DEPTH 2
 #define DISPLAY_NORMAL 3
-#define DISPLAY_INDIRECT 4
+#define DISPLAY_INDIRECT_DDGI 4
 #define DISPLAY_SUBDIV_DEPTH 5
 #define DISPLAY_ITERATIONS 6
 #define DISPLAY_PROBE_DEPTH 7
 #define DISPLAY_PROBE_COLOR 8
 #define DISPLAY_AO 9
+#define DISPLAY_WORLD_POS 10
+#define DISPLAY_DEBUG_EMISSIVE 11
+#define DISPLAY_FLAT_NORMAL 12
+#define DISPLAY_SSAO 13
+#define DISPLAY_INDIRECT 14
+#define DISPLAY_HZB 15
 
 vec3 trilinear_interpolate(
     vec3 c000, vec3 c100, vec3 c010, vec3 c110,
@@ -229,6 +239,8 @@ vec3 sample_indirect_light(vec3 wp, vec3 normal)
             
             vec3 probe_wp = vec3(probe_coord) * u_probe_spacing;
             float visibility_weight = compute_probe_visibility(moments, probe_wp, wp, normal);
+            if (probe.depth_moment <= 0.5f)
+                visibility_weight = 0.f;
 
             float combined_weight = visibility_weight * spatial_weight;
 
@@ -237,7 +249,7 @@ vec3 sample_indirect_light(vec3 wp, vec3 normal)
         }
 
         if (probe_weights_sum <= 0.0001f)
-            return vec3(0.f);
+            return vec3(1.f);
         
         vec3 indirect_light = vec3(0);
         // normalization and accumulation
@@ -287,7 +299,7 @@ vec3 calculate_brdf(vec3 L, vec3 V, vec3 N, vec3 albedo, float shininess)
 }
 
 
-vec3 calculate_incoming_light(ivec2 uvi)
+vec3 calculate_incoming_light(ivec2 uvi, float ao)
 {
     float voxel_size = 64.f / pow(4.f, 4.f);
 
@@ -298,6 +310,7 @@ vec3 calculate_incoming_light(ivec2 uvi)
     vec3 normal = imageLoad(u_normal, uvi).xyz;
     float depth = imageLoad(u_depth, uvi).x;
     vec3 albedo = imageLoad(u_albedo, uvi).rgb;
+    float emissive_factor = texelFetch(u_debug_texture, uvi, 0).b;
 
     if (depth > -0.5f)
     {
@@ -308,10 +321,23 @@ vec3 calculate_incoming_light(ivec2 uvi)
         vec3 V = -rd;
         vec3 brdf = calculate_brdf(L, V, normal, albedo, 0.f);
         
-        vec3 indirect_light = sample_indirect_light(quantized_hit_p, normal);
+        vec3 indirect_light;
+        if (u_ddgi == 1)
+            indirect_light = sample_indirect_light(quantized_hit_p, normal);
+        else
+            indirect_light = imageLoad(u_indirect_texture, uvi).rgb;
+
         vec3 direct_light = sample_direct_light(quantized_hit_p, normal) * brdf;
-        
-        vec3 reflected_light = indirect_light * (albedo / 3.14159) + direct_light;
+        vec3 diffuse_indirect = indirect_light * (albedo / 3.14159) * ao;
+        vec3 emissive = emissive_factor * albedo;
+
+        float emissive_max = max(emissive.r, max(emissive.g, emissive.b));
+        if (emissive_max > 1.f)
+        {
+            float white_transition = clamp(emissive_max / 50.0, 0.0, 1.0);
+            emissive = mix(emissive, vec3(emissive_max), white_transition);
+        }
+        vec3 reflected_light = diffuse_indirect + direct_light * ao + emissive;
         return reflected_light;
     }
     return vec3(0);
@@ -340,13 +366,39 @@ vec3 hash_u1f3(uint v)
     return fract(c / 256.f);
 }
 
+vec3 get_flat_normal(ivec2 uvi)
+{
+    float flat_normal = imageLoad(u_normal, uvi).w;
+    uint packed_normal = uint(round(flat_normal * 64.f));
+    vec3 normal;
+
+    normal.x = float(((packed_normal >> 0) & 3u)) - 1.f;
+    normal.y = float(((packed_normal >> 2) & 3u)) - 1.f;
+    normal.z = float(((packed_normal >> 4) & 3u)) - 1.f;
+    return normal;
+}
+
+vec3 calculate_voxel_pos(ivec2 iuv)
+{
+    float voxel_size = 64.f / pow(4.f, 4.f);
+    float depth = imageLoad(u_depth, iuv).x;
+    vec3 ro;
+    vec3 rd;
+    create_ray(iuv, ro, rd);
+    vec3 world_pos = ro + rd * depth - get_flat_normal(iuv) * voxel_size * 0.25f;
+    vec3 voxel_pos = floor(world_pos / voxel_size);
+    return voxel_pos;
+}
+
 void main()
 {
     ivec2 uvi = screen_coords();
-
     if (any(greaterThanEqual(uvi, imageSize(u_final))))
         return;
 
+    vec3 ro;
+    vec3 rd;
+    create_ray(uvi, ro, rd);
     vec2 uv = vec2(uvi) / vec2(imageSize(u_final));
     if (u_display_texture == DISPLAY_ALBEDO)
     {
@@ -359,29 +411,57 @@ void main()
         depth.x *= u_brightness;
         imageStore(u_final, uvi, depth);
     }
+    if (u_display_texture == DISPLAY_WORLD_POS)
+    {
+        float depth = imageLoad(u_depth, uvi).x;
+        float voxel_size = 128.f / pow(4.f, 4.f);
+
+        vec3 hit_p = ro + rd * depth;
+        vec3 quantized_hit_p = floor(hit_p / voxel_size) * voxel_size;
+        if (depth < 0.f)
+        {
+            quantized_hit_p = vec3(0);
+        }
+        quantized_hit_p = calculate_voxel_pos(uvi);
+        quantized_hit_p = mod(quantized_hit_p, 64)/64;
+
+        imageStore(u_final, uvi, vec4(quantized_hit_p, 1.f));
+    }
     if (u_display_texture == DISPLAY_ITERATIONS)
     {
         vec4 debug = texelFetch(u_debug_texture, uvi, 0);
         imageStore(u_final, uvi, vec4(debug.r * u_brightness, 0,0,1));
     }
+    if (u_display_texture == DISPLAY_DEBUG_EMISSIVE)
+    {
+        vec4 debug = texelFetch(u_debug_texture, uvi, 0);
+        imageStore(u_final, uvi, vec4(debug.b * u_brightness, 0,0,1));
+    }
+    if (u_display_texture == DISPLAY_AO)
+    {
+        vec4 debug = texelFetch(u_debug_texture, uvi, 0);
+        imageStore(u_final, uvi, vec4(vec3(debug.w),1));
+    }
     if (u_display_texture == DISPLAY_NORMAL)
     {
-        vec3 normal = imageLoad(u_normal, uvi).rgb;
+        vec3 normal = imageLoad(u_normal, uvi).xyz;
         imageStore(u_final, uvi, vec4(normal * 0.5f + 0.5f, 1.f));
+    }
+    if (u_display_texture == DISPLAY_FLAT_NORMAL)
+    {
+        vec3 normal = get_flat_normal(uvi);
+        imageStore(u_final, uvi, vec4(vec3(normal * 0.5 + 0.5), 1));
     }
     if (u_display_texture == DISPLAY_SUBDIV_DEPTH)
     {
         float depth = imageLoad(u_normal, uvi).a;
         imageStore(u_final, uvi, vec4(vec3(depth), 1.f));
     }
-    if (u_display_texture == DISPLAY_INDIRECT)
+    if (u_display_texture == DISPLAY_INDIRECT_DDGI)
     {
         float voxel_size = 64.f / pow(4.f, 4.f);
         float depth = imageLoad(u_depth, uvi).r;
 
-        vec3 ro;
-        vec3 rd;
-        create_ray(uvi, ro, rd);
         vec3 hit_p = ro + rd * depth;
         vec3 quantized_hit_p = floor(hit_p / voxel_size) * voxel_size;
         vec3 normal = imageLoad(u_normal, uvi).xyz;
@@ -390,26 +470,30 @@ void main()
         
         imageStore(u_final, uvi, vec4(indirect_light, 1.f));
     }
+    if (u_display_texture == DISPLAY_INDIRECT)
+    {
+        vec3 indirect_light = imageLoad(u_indirect_texture, uvi).rgb;
+        
+        imageStore(u_final, uvi, vec4(indirect_light, 1.f));
+    }
     if (u_display_texture == DISPLAY_FINAL)
     {
         float depth = imageLoad(u_depth, uvi).r;
         if (depth < 0.f)
         {
-            vec3 ro, rd;
-            create_ray(uvi, ro, rd);
             vec3 sky_color = sample_skybox(rd);
             imageStore(u_final, uvi, vec4(sky_color, 1.f));
             return;
         }
-        float ao = texture(u_ao, uv).r;
-        vec3 incoming_light = calculate_incoming_light(uvi);
-        imageStore(u_final, uvi, vec4(incoming_light * ao, 1.f));
+        vec4 debug = texelFetch(u_debug_texture, uvi, 0);
+        //float ao = texture(u_ao, uv).r;
+        float ao = debug.a;
+        vec3 incoming_light = calculate_incoming_light(uvi, ao);
+        vec3 hdr = incoming_light;
+        imageStore(u_final, uvi, vec4(hdr, 1.f));
     }
     if (u_display_texture == DISPLAY_PROBE_DEPTH)
     {
-        vec3 ro;
-        vec3 rd;
-        create_ray(uvi, ro, rd);
         //vec2 moments = sample_depth_moments(ro, rd);
         ivec3 probe_coord = clamp(coord_from_world(ro, u_probe_spacing), ivec3(0), ivec3(15));
 
@@ -418,20 +502,25 @@ void main()
         read_probe_data(probe_coord, rd, moments, indirect);
         imageStore(u_final, uvi, vec4(moments * u_brightness * vec2(1, 0), 0.f, 1.f));
     }
-    if (u_display_texture == DISPLAY_AO)
+    if (u_display_texture == DISPLAY_SSAO)
     {
         float ao = texture(u_ao, uv).r;
         imageStore(u_final, uvi, vec4(vec3(ao), 1.f));
     }
     if (u_display_texture == DISPLAY_PROBE_COLOR)
     {   
-        vec3 ro;
-        vec3 rd;
-        create_ray(uvi, ro, rd);
         //vec2 moments = sample_depth_moments(ro, rd);
         ivec3 probe_coord = clamp(coord_from_world(ro, u_probe_spacing), ivec3(0), ivec3(15));
 
         vec3 indirect = sample_indirect_light(ro, rd);
+
         imageStore(u_final, uvi, vec4(indirect, 1.f));
+    }
+    if (u_display_texture == DISPLAY_HZB)
+    {
+        int lod = int(u_frame_index) / 32;
+        lod = lod % textureQueryLevels(u_hzb);
+        vec2 minmax = textureLod(u_hzb, uv, lod).xy;
+        imageStore(u_final, uvi, vec4(u_brightness * minmax, 0, 1));
     }
 }

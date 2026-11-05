@@ -1,0 +1,45 @@
+#version 450 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+uniform float u_thickness;
+uniform int u_read_lod;
+
+uniform sampler2D u_depth_buffer;
+layout(rg16f, binding = 0) uniform readonly image2D u_read;
+layout(rg16f, binding = 1) uniform writeonly image2D u_write;
+
+
+void main()
+{
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, imageSize(u_write))))
+        return;
+    
+    if (u_read_lod == -1)
+    {
+        ivec2 tex_size = textureSize(u_depth_buffer, 0);
+        if (any(greaterThanEqual(gl_GlobalInvocationID.xy, tex_size)))
+            return;
+        ivec2 write_uvi = ivec2(gl_GlobalInvocationID.xy);
+        float depth = texelFetch(u_depth_buffer, write_uvi, 0).x;
+        vec2 minmax;
+        minmax.x = depth;
+        minmax.y = depth + u_thickness;
+        imageStore(u_write, write_uvi, vec4(minmax,0,0));
+        return;
+    }
+
+    vec2 minmax = vec2(1000000.f, -1.f);
+
+    ivec2 read_uvi = 2 * ivec2(gl_GlobalInvocationID.xy);
+    for(int y = 0; y < 2; y++)
+    for(int x = 0; x < 2; x++)
+    {
+        vec2 read_minmax = imageLoad(u_read, read_uvi + ivec2(x, y)).xy;
+        minmax.x = min(minmax.x, read_minmax.x);
+        minmax.y = max(minmax.y, read_minmax.y);
+    }
+
+    ivec2 write_uvi = ivec2(gl_GlobalInvocationID.xy);
+    imageStore(u_write, write_uvi, vec4(minmax, 0, 0));
+}

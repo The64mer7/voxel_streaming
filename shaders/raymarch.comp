@@ -9,9 +9,14 @@
 
 uniform mat4 u_inv_view;
 uniform mat4 u_inv_proj;
+
+
 uniform vec3 u_cam_pos;
 uniform uint u_frame_index;
 uniform float u_chunk_size;
+uniform uint u_max_depth;
+uniform float u_ao_radius;
+uniform float u_hysteresis;
 
 #define GROUP_SIZE 16
 layout(local_size_x = GROUP_SIZE, local_size_y = GROUP_SIZE) in;
@@ -24,6 +29,7 @@ layout(rgba16f, binding = 3) uniform image2D u_debug_texture;
 layout(rgba32ui, binding = 4) uniform uimage2D u_img_requests0;
 layout(rgba32ui, binding = 5) uniform uimage2D u_img_requests1;
 layout(rgba32ui, binding = 6) uniform uimage2D u_img_requests2;
+layout(rgba16f, binding = 7) uniform image2D u_indirect_texture;
 
 layout(std430, binding = 0) buffer ContreeRayLookupTable
 {
@@ -442,7 +448,7 @@ void descend(vec3 p, inout TraversalState state, vec3 ro, vec3 rd, vec3 ird, vec
     {
         TreeNode node = nodes.node_buffer[state.node_idx];
 
-        IF(is_leaf_node(node))
+        IF(is_leaf_node(node) || state.depth >= u_max_depth)
             break;
 
         float child_size = state.node_size / float(axis_branching_factor);
@@ -607,7 +613,7 @@ raymarch_hit raymarch_tree(float tree_size, vec3 ro, vec3 rd) // fix: issue with
         TreeNode node = nodes.node_buffer[state.node_idx];
         hit.iteration_count++;
         
-        IF(!is_leaf_node(node))
+        IF(!is_leaf_node(node) && state.depth < u_max_depth)
         {
             uint first_node = traverse_forward(hit, node, state, ro, rd, ird, vec3(srd), pos_rd, delta_dist, axis_branching_factor);
 
@@ -634,7 +640,7 @@ raymarch_hit raymarch_tree(float tree_size, vec3 ro, vec3 rd) // fix: issue with
         {
             hit.t = t_entry + prev_min_dist;
             hit.data = node.data;
-            hit.normal = prev_normal;
+            hit.normal = -prev_normal;
             hit.depth = state.depth;
             hit.node_idx = state.node_idx;
             hit.coord = state.coord;
@@ -666,6 +672,11 @@ void write_debug(vec4 debug)
 void write_normal(vec4 normal)
 {
     imageStore(u_normal, screen_coords(), normal);
+}
+
+void write_indirect(vec3 indirect)
+{
+    imageStore(u_indirect_texture, screen_coords(), vec4(indirect, 1));
 }
 
 //void write_request(uint request_node)
@@ -712,6 +723,11 @@ vec3 unpack_color(uint data)
     )/255.f;
 }
 
+float unpack_emissive(uint data)
+{
+    return float((data >> 24u) & 0xfu) / 2.f;
+}
+
 vec3 hash_u1f3(uint v)
 {
     vec3 c;
@@ -719,6 +735,39 @@ vec3 hash_u1f3(uint v)
     c.y = v * 1565851562 + 512156251;
     c.z = v * 495266251 + 154621665;
     return fract(c / 256.f);
+}
+
+uint hash_u1(uint v)
+{
+    v ^= v >> 16u;
+    v *= 0x7feb352du;
+    v ^= v >> 15u;
+    v *= 0x846ca68bu;
+    v ^= v >> 16u;
+    return v;
+}
+
+vec3 random_hemisphere_direction(vec3 normal, uint seed)
+{
+    float u1 = float(hash_u1(seed) >> 8u) * (1.0f / 16777216.0f);
+    float u2 = float(hash_u1(seed ^ 0x9e3779b9u) >> 8u) * (1.0f / 16777216.0f);
+
+    float radius = sqrt(u1);
+    float angle = 6.28318530718f * u2;
+    vec3 local_dir = vec3(
+        radius * cos(angle),
+        radius * sin(angle),
+        sqrt(max(0.0f, 1.0f - u1))
+    );
+
+    vec3 reference = abs(normal.z) < 0.999f ? vec3(0.0f, 0.0f, 1.0f)
+                                             : vec3(0.0f, 1.0f, 0.0f);
+    vec3 tangent = normalize(cross(reference, normal));
+    vec3 bitangent = cross(normal, tangent);
+
+    return normalize(tangent * local_dir.x +
+                     bitangent * local_dir.y +
+                     normal * local_dir.z);
 }
 
 vec3 unpack_normal(uint packed_normal)
@@ -819,6 +868,23 @@ uint get_expected_lod(float dist)
 
     return uint(floor(flod));
 }
+vec3 sun_dir()
+{
+    return normalize(vec3(1,-1,1));
+}
+vec3 sample_skybox(vec3 rd)
+{
+    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+
+    vec3 horizon_color = vec3(1.0, 0.55, 0.2);
+    vec3 zenith_color = vec3(0.25, 0.5, 0.9);
+    vec3 sky = mix(horizon_color, zenith_color, t);
+
+    vec3 sun_color = vec3(1.0, 0.85, 0.55) * 10.0;
+    float sun = smoothstep(0.9995, 0.9998, dot(rd, -sun_dir()));
+
+    return sky + sun_color * sun;
+}
 
 void main()
 {
@@ -838,21 +904,48 @@ void main()
     
     vec3 albedo = vec3(0.f);
     vec3 normal = vec3(0.f);
+    float emissive = 0.f;
+    vec4 debug = imageLoad(u_debug_texture, screen_coords());
+    vec3 new_indirect = vec3(0);
+
     if (hit.t >= -0.5f)
     {
         albedo = unpack_color(hit.data);
         normal = get_normal(hit.data);
+        emissive = unpack_emissive(hit.data);
+
+        ivec2 pixel = screen_coords() * 2651 + int(u_frame_index)*611191;
+        uint seed = uint(pixel.x) + uint(pixel.y) * uint(imageSize(u_albedo).x);
+
+        vec3 flat_normal = hit.normal;
+        vec3 ao_rd = random_hemisphere_direction(flat_normal, seed);
+        raymarch_hit ao_hit = raymarch_tree(u_chunk_size, pos_along_ray(ro, rd, hit.t) + flat_normal * NORMAL_SIZE, ao_rd);
+        float ao = 1.f;
+        if (ao_hit.t > 0.f)
+        {
+            new_indirect = unpack_color(ao_hit.data) * (1+16*unpack_emissive(ao_hit.data));
+            ao = min(ao_hit.t / u_ao_radius, 1.f);
+        }
+        else
+            new_indirect = sample_skybox(ao_rd);
+        debug.a = mix(ao, debug.a, u_hysteresis);
     }
 
-    vec4 debug = vec4(0);
     debug.r = hit.iteration_count / float(MAX_ITERATIONS) * 4;
     debug.g = hit.depth;
-    
-    //write_albedo(vec3(hit.iteration_count / float(MAX_ITERATIONS)));
+    debug.b = emissive;
+
+    uvec3 normal_shifted = uvec3(round(hit.normal + 1.f));
+    uint packed_normal = normal_shifted.x | (normal_shifted.y << 2) | (normal_shifted.z << 4);
+    write_normal(vec4(normal, float(packed_normal)/64.f));
+
     write_albedo(albedo);
     write_depth(hit.t);
-    write_normal(vec4(normal, hit.depth/8.f));
     write_debug(debug);
+
+    vec3 accum_indirect = imageLoad(u_indirect_texture, screen_coords()).rgb;
+    accum_indirect = mix(new_indirect, accum_indirect, u_hysteresis);
+    write_indirect(accum_indirect);
 
     barrier();
     if (hit.t >= -0.5f)
@@ -885,4 +978,3 @@ void main()
         }
     }
 }
-

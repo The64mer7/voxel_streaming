@@ -7,13 +7,18 @@
 class PageAllocator
 {
 public:
-    void set_page_count(uint32_t max_num_pages) { m_max_num_pages = max_num_pages; }
+    void set_page_count(uint32_t max_num_pages, uint32_t num_freelists)
+    {
+        m_max_num_pages = max_num_pages;
+        m_freelists.resize(num_freelists);
+    }
     uint32_t allocate_page()
     {
-        if (!m_freelist.empty())
+        FreelistStack* freelist = find_nonempty_freelist();
+        if (freelist)
         {
-            uint32_t page = m_freelist.top();
-            m_freelist.pop();
+            uint32_t page = freelist->top();
+            freelist->pop();
             return page;
         }
 
@@ -24,13 +29,41 @@ public:
 
         return UINT32_MAX;
     }
-    void free_page(uint32_t page) { m_freelist.push(page); }
-    uint32_t free_pages_count() { return (m_max_num_pages - m_next_page) + m_freelist.size(); }
+    void free_page(uint32_t page) { get_freelist(page)->push(page); }
+    uint32_t free_pages_count() { return 0; }
 
 private:
+    using FreelistStack = std::stack<uint32_t, std::vector<uint32_t>>;
+
+    FreelistStack* find_nonempty_freelist()
+    {
+        for (size_t i = 0; i < m_freelists.size(); i++)
+        {
+            if (m_freelists[i].size() > 0)
+            {
+                return &m_freelists[i];
+            }
+        }
+
+        return nullptr;
+    }
+    FreelistStack* get_freelist(uint32_t page)
+    {
+        uint32_t chunk_size = (m_max_num_pages + m_freelists.size() - 1) / m_freelists.size();
+        size_t index = page / chunk_size;
+        if (index >= m_freelists.size())
+        {
+            index = m_freelists.size() - 1;
+        }
+
+        return &m_freelists[index];
+    }
+
     uint32_t m_next_page = 0;
     uint32_t m_max_num_pages = 0;
-    std::stack<uint32_t, std::vector<uint32_t>> m_freelist;
+
+    std::vector<FreelistStack> m_freelists;
+    std::vector<uint64_t> m_avail_freelists_bitmask;
 };
 
 template <typename T, size_t PageSize>
@@ -43,7 +76,7 @@ public:
     };
     void create(size_t num_pages)
     {
-        m_allocator.set_page_count(num_pages);
+        m_allocator.set_page_count(num_pages, 1);
         m_pages.resize(num_pages);
     }
 

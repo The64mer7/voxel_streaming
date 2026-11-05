@@ -1,0 +1,90 @@
+#version 460 core 
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, binding = 0) uniform image2D u_debug_texture;
+layout(r16f, binding = 1) uniform image2D u_depth;
+layout(rgba16_snorm, binding = 2) uniform image2D u_normal;
+layout(rgba16f, binding = 3) uniform image2D u_indirect_texture;
+
+uniform int u_blur_kernel_half_size;
+uniform ivec2 u_blur_dir;
+
+uniform mat4 u_inv_view;
+uniform mat4 u_inv_proj;
+uniform float u_voxel_size;
+uniform vec3 u_cam_pos;
+
+void create_ray(ivec2 uvi, out vec3 ro, out vec3 rd)
+{
+    ivec2 img_size = imageSize(u_debug_texture);
+
+    vec2 ndc = (vec2(uvi) + 0.5f) / vec2(img_size) * 2.0f - 1.0f;
+    float aspect = float(img_size.x) / float(img_size.y);
+    
+    vec4 clip = u_inv_proj * vec4(ndc, -1.0f, 1.0f);
+    clip /= clip.w;
+    vec4 world_pos = u_inv_view * clip;
+
+    ro = u_cam_pos;
+    rd = normalize(world_pos.xyz - ro);
+}
+
+vec3 get_flat_normal(ivec2 uvi)
+{
+    float flat_normal = imageLoad(u_normal, uvi).w;
+    uint packed_normal = uint(round(flat_normal * 64.f));
+    vec3 normal;
+
+    normal.x = float(((packed_normal >> 0) & 3u)) - 1.f;
+    normal.y = float(((packed_normal >> 2) & 3u)) - 1.f;
+    normal.z = float(((packed_normal >> 4) & 3u)) - 1.f;
+    return normal;
+}
+
+vec3 calculate_voxel_pos(ivec2 iuv)
+{
+    float depth = imageLoad(u_depth, iuv).x;
+    vec3 ro;
+    vec3 rd;
+    create_ray(iuv, ro, rd);
+    vec3 world_pos = ro + rd * depth - get_flat_normal(iuv) * u_voxel_size * 0.25f;
+    vec3 voxel_pos = floor(world_pos / u_voxel_size);
+    return voxel_pos;
+}
+
+void main()
+{
+    ivec2 img_size = imageSize(u_debug_texture);
+    ivec2 iuv = ivec2(gl_GlobalInvocationID.xy);
+
+    if (any(greaterThanEqual(iuv, img_size)))
+        return;
+
+    
+    vec3 ref_voxel_pos = calculate_voxel_pos(iuv);
+
+    float ao = 0.f;
+    vec4 indirect = vec4(0);
+    int sample_count = 0;
+    for (int i = -u_blur_kernel_half_size; i <= u_blur_kernel_half_size; i++)
+    {
+        ivec2 coord = clamp(iuv + ivec2(i) * u_blur_dir, ivec2(0), img_size - 1);
+        float ao_sample = imageLoad(u_debug_texture, coord).w;
+        float depth_sample = imageLoad(u_depth, coord).x;
+        vec4 indirect_sample = imageLoad(u_indirect_texture, coord);
+        vec3 voxel_pos_sample = calculate_voxel_pos(coord);
+
+        bool is_same_edge = ref_voxel_pos == voxel_pos_sample;
+
+        ao += is_same_edge ? ao_sample : 0.f;
+        indirect += is_same_edge ? indirect_sample : vec4(0.f);
+        sample_count += int(is_same_edge);
+    }
+    ao /= sample_count;
+    indirect /= sample_count;
+    barrier();
+    vec4 debug = imageLoad(u_debug_texture, iuv);
+    imageStore(u_debug_texture, iuv, vec4(debug.xyz, ao));
+    imageStore(u_indirect_texture, iuv, indirect);
+}

@@ -22,9 +22,6 @@
 
 #include <stb_image.h>
 
-using create_pfn = bool (*)(const glm::vec3& origin, float size, NodeT::data_t* data);
-using homogeneous_pfn = bool (*)(const glm::vec3& origin, float size);
-
 struct Texture2D
 {
     std::vector<stbi_uc> data;
@@ -229,12 +226,11 @@ public:
                     color_rgba4 |= (color_rgba8[0] / 16u) << 0u;
                     color_rgba4 |= (color_rgba8[1] / 16u) << 4u;
                     color_rgba4 |= (color_rgba8[2] / 16u) << 8u;
-                    // color_rgba4 = TerrainGen::pack_normal(bary);
                 }
             }
 
             uint32_t material_hash = (mat * 1151 + 165591) & 0xfffu;
-            *data = color_rgba4 | (TerrainGen::pack_normal(info.normal) << 12);
+            *data = color_rgba4 | (TerrainGen::pack_vec3_3x4bits(info.normal) << 12);
         }
         else
             *data = 0u;
@@ -266,13 +262,13 @@ class SphereContree
 {
 public:
     inline static glm::vec4 sphere = glm::vec4{16, 16, 16, 8};
-    static bool create3d(const glm::vec3& origin, float size, NodeT::data_t* data)
+    static bool create3d(const glm::vec3& origin, float size, contree_node::data_t* data)
     {
         bool collide = check_sphere_shell_aabb_collision(sphere, origin, glm::vec3(size));
         if (collide)
         {
             glm::vec3 normal = glm::normalize((origin + size * 0.5f) - glm::xyz(sphere));
-            uint32_t packed_normal = TerrainGen::pack_normal(normal);
+            uint32_t packed_normal = TerrainGen::pack_vec3_3x4bits(normal);
             *data = (packed_normal << 12) | 0x00000fff;
         }
         else
@@ -333,19 +329,22 @@ public:
     inline static uint32_t color = 0xfff;
     inline static uint32_t clear = 1;
 
-    static bool create3d(const glm::vec3& origin, float size, NodeT::data_t* data)
+    static bool create3d(const glm::vec3& origin, float size, contree_node::data_t* data,
+                         contree_node::data_t* data_normal = nullptr)
     {
+        glm::vec3 direction = origin + size * 0.5f - glm::vec3(ball);
+        glm::vec3 normal = glm::dot(direction, direction) > 0.0f ? glm::normalize(direction)
+                                                                 : glm::vec3(0.0f, 1.0f, 0.0f);
+        uint32_t packed_normal = TerrainGen::pack_vec3_3x4bits(normal);
+        if (data_normal)
+            *data_normal = packed_normal;
         if (!intersects_ball_aabb(ball, origin, glm::vec3(size)))
         {
             *data = 0;
             return false;
         }
-
-        glm::vec3 direction = origin + size * 0.5f - glm::vec3(ball);
-        glm::vec3 normal = glm::dot(direction, direction) > 0.0f ? glm::normalize(direction)
-                                                                 : glm::vec3(0.0f, 1.0f, 0.0f);
-        uint32_t packed_normal = TerrainGen::pack_normal(normal);
         *data = (clear == 1 ? 0 : (color | (packed_normal << 12)));
+
         return true;
     }
 
@@ -382,7 +381,7 @@ public:
         return glm::vec3(chunk_key) * chunk_size;
     }
 
-    static bool create3d(const glm::vec3& origin, float size, NodeT::data_t* data)
+    static bool create3d(const glm::vec3& origin, float size, contree_node::data_t* data)
     {
         if (SphereContree::create3d(origin, size, data))
             return true;
@@ -390,7 +389,7 @@ public:
         glm::vec3 center = origin + size * 0.5f;
         float d = TerrainGen::map(center);
         float h = TerrainGen::hash(center);
-        int variation = static_cast<int>(h * 32.0f) % 32;
+        int variation = static_cast<int>(h * 32.0f) % 8;
 
         uint32_t r = static_cast<uint32_t>((60.0f + variation) / 17.0f) & 0xf;
         uint32_t g = static_cast<uint32_t>(150.0f / 17.0f) & 0xf;
@@ -403,10 +402,11 @@ public:
 
         glm::vec2 minmax = TerrainGen::minmax_map(origin + size * 0.5f, glm::vec3(size * 0.5f));
         *data = minmax.x < 0 ? c : 0;
+        *data = glm::sign(minmax.x) != glm::sign(minmax.y) ? c : 0;
         if (*data)
         {
             glm::vec3 normal = TerrainGen::map_normal(center);
-            uint32_t packed_normal = TerrainGen::pack_normal(normal);
+            uint32_t packed_normal = TerrainGen::pack_vec3_3x4bits(normal);
             *data |= packed_normal << 12;
         }
 
@@ -430,7 +430,7 @@ public:
         return glm::vec3(chunk_key) * chunk_size;
     }
 
-    static bool create3d(const glm::vec3& origin, float size, NodeT::data_t* data)
+    static bool create3d(const glm::vec3& origin, float size, contree_node::data_t* data)
     {
         glm::vec3 center = origin + size * 0.5f;
         float d = TerrainGen::map(center);
@@ -454,7 +454,7 @@ public:
         if (*data)
         {
             glm::vec3 normal = TerrainGen::map_normal(center);
-            uint32_t packed_normal = TerrainGen::pack_normal(normal);
+            uint32_t packed_normal = TerrainGen::pack_vec3_3x4bits(normal);
             *data |= packed_normal << 12;
         }
 
@@ -467,7 +467,7 @@ public:
     }
     static constexpr uint32_t invalid_offset = UINT32_MAX;
 
-    static bool subdivide(const glm::ivec4& coord, NodeT* nodes, uint32_t first_child_idx,
+    static bool subdivide(const glm::ivec4& coord, contree_node* nodes, uint32_t first_child_idx,
                           uint32_t parent_idx)
     {
         int depth = coord.w;
@@ -476,7 +476,7 @@ public:
         uint32_t node_idx = 0;
         for (int i = 0; i < depth; i++)
         {
-            NodeT& node = s_nodes[node_idx];
+            contree_node& node = s_nodes[node_idx];
             glm::ivec3 local = remaining_coords % 4;
             int local_bit = local.x + 4 * local.y + 16 * local.z;
             if (node.childmask.get(local_bit))
@@ -492,14 +492,14 @@ public:
         if (node_idx != invalid_offset)
         {
 
-            NodeT& node = s_nodes[node_idx];
+            contree_node& node = s_nodes[node_idx];
             uint32_t child_count = node.child_count();
             if (child_count > 0)
             {
                 for (int i = 0; i < 64; i++)
                 {
                     nodes[first_child_idx + i] = s_nodes[node.firstchild + i];
-                    nodes[first_child_idx + i].clear_bits();
+                    nodes[first_child_idx + i].unlink_children();
                     nodes[first_child_idx + i].firstchild = invalid_offset;
                     nodes[first_child_idx + i].parent = parent_idx;
                 }
@@ -515,9 +515,9 @@ public:
                                   uint32_t max_depth)
     {
         s_nodes.resize(1024 * 1024 * 20);
-        s_allocator.create(s_nodes.size() / 64, 64);
+        s_allocator.create(s_nodes.size() / 64, 64, 64);
         std::vector<uint32_t> out_pages;
-        return create_3d_dfs_fixed_page<create_pfn, homogeneous_pfn>(
+        return create_3d_dfs_fixed_page<create_nonormal_pfn, homogeneous_pfn>(
             &s_allocator, s_nodes.data(), TerrainContree::create3d, TerrainContree::homogeneous3d,
             chunk_origin, chunk_size, max_depth, out_pages);
     }
@@ -526,7 +526,7 @@ public:
                                    uint32_t max_depth, ame_bvh& bvh)
     {
         s_nodes.resize(1024 * 1024 * 128);
-        s_allocator.create(s_nodes.size() / 64, 64);
+        s_allocator.create(s_nodes.size() / 64, 64, 64);
         std::vector<uint32_t> out_pages;
         create_3d_dfs_mesh_fixed_page(&s_allocator, 0, s_nodes.data(), bvh, chunk_origin,
                                       chunk_size, max_depth, out_pages);
@@ -534,6 +534,6 @@ public:
         return true;
     }
 
-    inline static std::vector<NodeT> s_nodes;
+    inline static std::vector<contree_node> s_nodes;
     inline static NodeAllocator s_allocator;
 };

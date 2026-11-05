@@ -26,14 +26,14 @@ struct GenerateInfo
 
 template <typename PFNCreate, typename PFNHomogeneous>
 bool subdivide_node(const BuildInfo& info, const GenerateInfo<PFNCreate, PFNHomogeneous>& gen_info,
-                    uint32_t node_idx, uint32_t first_child_idx, NodeT* nodes,
+                    uint32_t node_idx, uint32_t first_child_idx, contree_node* nodes,
                     uint32_t axis_branching_factor)
 
 {
     if (gen_info.pfn_homogeneous(info.chunk_origin, info.chunk_size))
         return false;
 
-    NodeT& node = nodes[node_idx];
+    contree_node& node = nodes[node_idx];
     uint32_t write_idx = first_child_idx;
     uint32_t child_bit = 0;
 
@@ -44,16 +44,16 @@ bool subdivide_node(const BuildInfo& info, const GenerateInfo<PFNCreate, PFNHomo
                 float child_size = info.chunk_size / axis_branching_factor;
                 glm::vec3 child_origin = info.chunk_origin + child_size * glm::vec3(x, y, z);
 
-                NodeT& child_node = nodes[write_idx];
+                contree_node& child_node = nodes[write_idx];
 
                 bool created = gen_info.pfn_create(child_origin, child_size, &child_node.data);
                 if (created)
                 {
-                    child_node.firstchild = NodeT::invalid_offset;
+                    child_node.firstchild = contree_node::invalid_offset;
                     child_node.childmask.clear();
                     child_node.parent = node_idx;
 
-                    node.set_bit(child_bit);
+                    node.set_child(child_bit);
                     write_idx++;
                 }
                 child_bit++;
@@ -69,7 +69,7 @@ bool subdivide_node(const BuildInfo& info, const GenerateInfo<PFNCreate, PFNHomo
     return true;
 }
 
-static void subdivide_nodes(NodeT* nodes, uint32_t idx, NodeAllocator* allocator)
+static void subdivide_nodes(contree_node* nodes, uint32_t idx, NodeAllocator* allocator)
 {
     if (nodes[idx].firstchild == UINT32_MAX)
     {
@@ -80,7 +80,7 @@ static void subdivide_nodes(NodeT* nodes, uint32_t idx, NodeAllocator* allocator
         {
             nodes[c_idx + i].parent = idx;
             nodes[c_idx + i].firstchild = UINT32_MAX;
-            nodes[c_idx + i].clear_bits();
+            nodes[c_idx + i].unlink_children();
             nodes[c_idx + i].data = nodes[idx].data;
         }
         return;
@@ -88,21 +88,21 @@ static void subdivide_nodes(NodeT* nodes, uint32_t idx, NodeAllocator* allocator
     uint32_t first = nodes[idx].firstchild;
     for (int i = 0; i < 64; i++)
     {
-        if (nodes[idx].get_bit(i))
+        if (nodes[idx].has_child(i))
         {
         }
         else
         {
             nodes[first + i].firstchild = UINT32_MAX;
             nodes[first + i].data = nodes[idx].data;
-            nodes[first + i].clear_bits();
+            nodes[first + i].unlink_children();
             nodes[first + i].parent = idx;
         }
         subdivide_nodes(nodes, first + i, allocator);
     }
 }
 
-static void copy_node_data_to_children(NodeT* nodes, uint32_t idx, uint32_t first_child)
+static void copy_node_data_to_children(contree_node* nodes, uint32_t idx, uint32_t first_child)
 {
     nodes[idx].firstchild = first_child;
     nodes[idx].childmask.fill_mask(0, 63);
@@ -110,19 +110,20 @@ static void copy_node_data_to_children(NodeT* nodes, uint32_t idx, uint32_t firs
     {
         nodes[first_child + i].parent = idx;
         nodes[first_child + i].firstchild = UINT32_MAX;
-        nodes[first_child + i].clear_bits();
+        nodes[first_child + i].unlink_children();
         nodes[first_child + i].data = nodes[idx].data;
     }
 }
 
-static void free_children_3d_fixed_page(NodeAllocator* allocator, uint32_t node_idx, NodeT* nodes)
+static void free_children_3d_fixed_page(NodeAllocator* allocator, uint32_t node_idx,
+                                        contree_node* nodes)
 {
     uint32_t first_child = nodes[node_idx].firstchild;
     if (first_child == UINT32_MAX)
         return;
     for (int i = 0; i < 64; i++)
     {
-        if (nodes[node_idx].get_bit(i))
+        if (nodes[node_idx].has_child(i))
         {
             free_children_3d_fixed_page(allocator, first_child + i, nodes);
         }
@@ -131,13 +132,16 @@ static void free_children_3d_fixed_page(NodeAllocator* allocator, uint32_t node_
     allocator->free(first_child);
 }
 
-using create_pfn = bool (*)(const glm::vec3& origin, float size, NodeT::data_t* data);
+using create_pfn = bool (*)(const glm::vec3& origin, float size, contree_node::data_t* data,
+                            contree_node::data_t* data_normal);
+using create_nonormal_pfn = bool (*)(const glm::vec3& origin, float size,
+                                     contree_node::data_t* data);
 using homogeneous_pfn = bool (*)(const glm::vec3& origin, float size);
 
 struct Contree3DModifier
 {
     NodeAllocator* allocator;
-    NodeT* nodes;
+    contree_node* nodes;
     uint32_t num_nodes;
     create_pfn modify_fn;
     homogeneous_pfn modify_homogeneous_fn;
@@ -180,10 +184,10 @@ struct Contree3DModifier
             if (frame.node_idx == UINT32_MAX)
                 continue;
 
-            NodeT& node = nodes[frame.node_idx];
+            contree_node& node = nodes[frame.node_idx];
             bool is_homogeneous = modify_homogeneous_fn(frame.origin, frame.size);
             uint32_t data;
-            bool affects_volume = modify_fn(frame.origin, frame.size, &data);
+            bool affects_volume = modify_fn(frame.origin, frame.size, &data, nullptr);
 
             if (!affects_volume)
                 continue;
@@ -200,7 +204,7 @@ struct Contree3DModifier
             {
                 free_children_3d_fixed_page(allocator, frame.node_idx, nodes);
                 node.firstchild = UINT32_MAX;
-                node.clear_bits();
+                node.unlink_children();
 
                 node.data = data;
                 continue;
@@ -222,13 +226,13 @@ struct Contree3DModifier
             {
                 uint32_t child_idx = node.firstchild + i;
 
-                if (!node.get_bit(i))
+                if (!node.has_child(i))
                 {
-                    NodeT& child_node = nodes[child_idx];
+                    contree_node& child_node = nodes[child_idx];
                     child_node.firstchild = UINT32_MAX;
                     child_node.parent = frame.node_idx;
                     child_node.data = node.data;
-                    child_node.clear_bits();
+                    child_node.unlink_children();
                 }
             }
             node.childmask.fill_mask(0, 63);
@@ -266,7 +270,7 @@ struct Contree3DModifier
             if (frame.node_idx == UINT32_MAX)
                 continue;
 
-            NodeT& node = nodes[frame.node_idx];
+            contree_node& node = nodes[frame.node_idx];
             bool is_homogeneous = modify_homogeneous_fn(frame.origin, frame.size);
 
             update_minmax(frame.node_idx);
@@ -275,10 +279,10 @@ struct Contree3DModifier
             {
                 free_children_3d_fixed_page(allocator, frame.node_idx, nodes);
                 node.firstchild = UINT32_MAX;
-                node.clear_bits();
+                node.unlink_children();
 
                 uint32_t data;
-                modify_fn(frame.origin, frame.size, &node.data);
+                modify_fn(frame.origin, frame.size, &node.data, nullptr);
                 continue;
             }
 
@@ -296,13 +300,13 @@ struct Contree3DModifier
             {
                 uint32_t child_idx = node.firstchild + i;
 
-                if (!node.get_bit(i))
+                if (!node.has_child(i))
                 {
-                    NodeT& child_node = nodes[child_idx];
+                    contree_node& child_node = nodes[child_idx];
                     child_node.firstchild = UINT32_MAX;
                     child_node.parent = frame.node_idx;
                     child_node.data = node.data;
-                    child_node.clear_bits();
+                    child_node.unlink_children();
                 }
             }
             node.childmask.fill_mask(0, 63);
@@ -318,10 +322,10 @@ struct Contree3DModifier
                         float child_size = frame.size * 0.25f;
                         glm::vec3 child_origin = frame.origin + child_size * glm::vec3(x, y, z);
 
-                        NodeT& child_node = nodes[child_idx];
+                        contree_node& child_node = nodes[child_idx];
 
                         uint32_t data;
-                        bool modified = modify_fn(child_origin, child_size, &data);
+                        bool modified = modify_fn(child_origin, child_size, &data, nullptr);
                         if (modified)
                         {
                             num_nodes++;
@@ -357,7 +361,7 @@ struct Contree3DModifier
             if (frame.node_idx == UINT32_MAX)
                 continue;
 
-            NodeT& node = nodes[frame.node_idx];
+            contree_node& node = nodes[frame.node_idx];
             bool is_homogeneous = modify_homogeneous_fn(frame.origin, frame.size);
 
             update_minmax(frame.node_idx);
@@ -366,37 +370,15 @@ struct Contree3DModifier
             {
                 free_children_3d_fixed_page(allocator, frame.node_idx, nodes);
                 node.firstchild = UINT32_MAX;
-                node.clear_bits();
+                node.unlink_children();
 
                 uint32_t data;
-                modify_fn(frame.origin, frame.size, &node.data);
+                modify_fn(frame.origin, frame.size, &node.data, nullptr);
                 continue;
             }
 
-            if (node.firstchild == UINT32_MAX)
-            {
-                uint32_t first_child = allocator->allocate();
-                update_minmax(first_child, first_child + 64);
-
-                if (first_child == UINT32_MAX)
-                    exit(1);
-                node.firstchild = first_child;
-            }
-
-            for (uint32_t i = 0; i < 64; i++)
-            {
-                uint32_t child_idx = node.firstchild + i;
-
-                if (!node.get_bit(i))
-                {
-                    NodeT& child_node = nodes[child_idx];
-                    child_node.firstchild = UINT32_MAX;
-                    child_node.parent = frame.node_idx;
-                    child_node.data = node.data;
-                    child_node.clear_bits();
-                }
-            }
-            node.childmask.fill_mask(0, 63);
+            if (node.is_leaf())
+                subdivide_node(frame.node_idx);
 
             for (int z = 0; z < 4; z++)
                 for (int y = 0; y < 4; y++)
@@ -404,26 +386,35 @@ struct Contree3DModifier
                     {
                         uint32_t flat_idx = x + 4 * y + 16 * z;
                         uint32_t child_idx = node.firstchild + flat_idx;
-
                         float child_size = frame.size * 0.25f;
                         glm::vec3 child_origin = frame.origin + child_size * glm::vec3(x, y, z);
+                        contree_node& child_node = nodes[child_idx];
 
-                        NodeT& child_node = nodes[child_idx];
-
-                        uint32_t data;
-                        bool modified = modify_fn(child_origin, child_size, &data);
+                        uint32_t data = 0;
+                        uint32_t normal = 0;
+                        bool modified = modify_fn(child_origin, child_size, &data, &normal);
                         if (modified)
                         {
+                            if (!node.has_child(flat_idx))
+                            {
+                                node.set_child(flat_idx);
+                                child_node.make_leaf(0, frame.node_idx);
+                            }
+
                             if (frame.depth + 1 < max_depth)
                             {
+                                if (child_node.is_leaf())
+                                {
+                                    subdivide_node(child_idx);
+                                }
                                 StackFrame child_frame = {child_origin, child_size, child_idx,
                                                           frame.depth + 1};
                                 stack.push_back(child_frame);
                             }
-                            else
+                            else // leaves reached (optimization: not pushed to stack)
                             {
-                                child_node.data = data;
                             }
+                            child_node.data = data;
                         }
                     }
             if (frame.depth + 1 >= max_depth)
@@ -447,7 +438,7 @@ struct Contree3DModifier
                 bool homogeneous = true;
                 uint32_t data = UINT32_MAX;
                 uint32_t full_data = data;
-                NodeT& node = nodes[node_idx];
+                contree_node& node = nodes[node_idx];
                 if (node.firstchild == UINT32_MAX)
                     continue;
 
@@ -455,17 +446,17 @@ struct Contree3DModifier
                 {
                     uint32_t node_data = 0;
                     uint32_t child_idx = node.firstchild + i;
-                    if (node.get_bit(i))
+                    if (node.has_child(i))
                     {
                         node_data = nodes[child_idx].data;
                     }
 
                     if (data == UINT32_MAX)
                     {
-                        data = node_data & ((1u << 12u) - 1u);
+                        data = node_data; // & ((1u << 12u) - 1u);
                         full_data = node_data;
                     }
-                    node_data = node_data & ((1u << 12u) - 1u);
+                    node_data = node_data; // & ((1u << 12u) - 1u);
 
                     if (data != node_data)
                     {
@@ -480,7 +471,7 @@ struct Contree3DModifier
                     free_children_3d_fixed_page(allocator, node_idx, nodes);
                     node.data = full_data;
                     node.firstchild = UINT32_MAX;
-                    node.clear_bits();
+                    node.unlink_children();
                     if (node.parent != UINT32_MAX)
                     {
                         deepest_non_leaves.push(node.parent);
@@ -492,13 +483,92 @@ struct Contree3DModifier
             }
     }
 
+    enum modify_status
+    {
+        modify_status_modified,
+        modify_status_skipped,
+        modify_status_merged
+    };
+    modify_status modify_3d_dfs_rec3(glm::vec3 origin, float size, uint32_t node_idx,
+                                     uint32_t depth)
+    {
+        if (node_idx == UINT32_MAX)
+            return modify_status_skipped;
+
+        contree_node& node = nodes[node_idx];
+        bool is_homogeneous = modify_homogeneous_fn(origin, size);
+
+        update_minmax(node_idx);
+
+        if (is_homogeneous)
+        {
+            free_children_3d_fixed_page(allocator, node_idx, nodes);
+            node.firstchild = UINT32_MAX;
+            node.unlink_children();
+
+            uint32_t data;
+            modify_fn(origin, size, &node.data, nullptr);
+            return modify_status_merged;
+        }
+
+        if (node.is_leaf())
+            subdivide_node(node_idx);
+
+        modify_status status = modify_status_skipped;
+        for (int z = 0; z < 4; z++)
+            for (int y = 0; y < 4; y++)
+                for (int x = 0; x < 4; x++)
+                {
+                    uint32_t flat_idx = x + 4 * y + 16 * z;
+                    uint32_t child_idx = node.firstchild + flat_idx;
+                    float child_size = size * 0.25f;
+                    glm::vec3 child_origin = origin + child_size * glm::vec3(x, y, z);
+                    contree_node& child_node = nodes[child_idx];
+
+                    uint32_t data = 0;
+                    uint32_t normal = 0;
+                    bool modified = modify_fn(child_origin, child_size, &data, &normal);
+                    if (modified)
+                    {
+                        if (!node.has_child(flat_idx))
+                        {
+                            node.set_child(flat_idx);
+                            child_node.make_leaf(0, node_idx);
+                        }
+
+                        if (depth + 1 < max_depth)
+                        {
+                            if (child_node.is_leaf())
+                            {
+                                if (child_node.data == 0)
+                                    aabbs->push_back(glm::vec4(origin, size));
+                                subdivide_node(child_idx);
+                            }
+                            modify_status substatus = modify_3d_dfs_rec3(child_origin, child_size,
+                                                                         child_idx, depth + 1);
+
+                            if (substatus != modify_status_skipped)
+                            {
+                                status = substatus;
+                                child_node.data = data;
+                            }
+                        }
+                        else // leaves reached (optimization: not pushed to stack)
+                        {
+                            child_node.data = data;
+                        }
+                    }
+                }
+        return status;
+    }
+
     void modify_3d_dfs_rec(const glm::vec3& origin, float size, uint32_t node_idx, uint32_t depth)
     {
         if (node_idx == UINT32_MAX)
             return;
 
         uint32_t data;
-        bool affects_volume = modify_fn(origin, size, &data);
+        bool affects_volume = modify_fn(origin, size, &data, nullptr);
         if (!affects_volume)
             return;
 
@@ -506,7 +576,7 @@ struct Contree3DModifier
 
         assert(node_idx < num_nodes);
 
-        NodeT& node = nodes[node_idx];
+        contree_node& node = nodes[node_idx];
 
         if (depth >= max_depth)
         {
@@ -519,7 +589,7 @@ struct Contree3DModifier
         {
             free_children_3d_fixed_page(allocator, node_idx, nodes);
             node.firstchild = UINT32_MAX;
-            node.clear_bits();
+            node.unlink_children();
             node.data = data;
             return;
         }
@@ -542,13 +612,13 @@ struct Contree3DModifier
         {
             uint32_t child_idx = node.firstchild + i;
 
-            if (!node.get_bit(i))
+            if (!node.has_child(i))
             {
-                NodeT& child_node = nodes[child_idx];
+                contree_node& child_node = nodes[child_idx];
                 child_node.firstchild = UINT32_MAX;
                 child_node.parent = node_idx;
                 child_node.data = node.data;
-                child_node.clear_bits();
+                child_node.unlink_children();
             }
         }
         node.childmask.fill_mask(0, 63);
@@ -564,15 +634,35 @@ struct Contree3DModifier
             modify_3d_dfs_rec(child_origin, child_size, child_idx, depth + 1);
         }
     }
+
+private:
+    void subdivide_node(uint32_t node_idx)
+    {
+        contree_node& node = nodes[node_idx];
+        uint32_t first_child = allocator->allocate();
+        update_minmax(first_child, first_child + 64);
+
+        if (first_child == UINT32_MAX)
+            exit(1);
+        node.firstchild = first_child;
+        node.childmask.fill_mask(0, 63);
+        for (uint32_t i = 0; i < 64; i++)
+        {
+            uint32_t child_idx = node.firstchild + i;
+
+            contree_node& child_node = nodes[child_idx];
+            child_node.make_leaf(node.data, node_idx);
+        }
+    }
 };
 
 template <typename CreateFunc, typename HomogeneousFunc>
-static bool modify_3d_dfs_fixed_page_iter(NodeAllocator* allocator, uint32_t root_idx, NodeT* nodes,
-                                          uint32_t num_nodes, CreateFunc modify_fn,
-                                          HomogeneousFunc modify_homogeneous_fn,
-                                          const glm::vec3& chunk_origin, float chunk_size,
-                                          uint32_t max_depth, std::vector<uint32_t>& out_pages,
-                                          std::vector<glm::vec4>& aabbs)
+static bool
+modify_3d_dfs_fixed_page_iter(NodeAllocator* allocator, uint32_t root_idx, contree_node* nodes,
+                              uint32_t num_nodes, CreateFunc modify_fn,
+                              HomogeneousFunc modify_homogeneous_fn, const glm::vec3& chunk_origin,
+                              float chunk_size, uint32_t max_depth,
+                              std::vector<uint32_t>& out_pages, std::vector<glm::vec4>& aabbs)
 
 {
     struct StackFrame
@@ -590,7 +680,7 @@ static bool modify_3d_dfs_fixed_page_iter(NodeAllocator* allocator, uint32_t roo
         StackFrame frame = stack.back();
         stack.pop_back();
 
-        NodeT& node = nodes[frame.node_idx];
+        contree_node& node = nodes[frame.node_idx];
 
         uint32_t first_child = node.firstchild;
         if (modify_homogeneous_fn(frame.origin, frame.size))
@@ -599,7 +689,7 @@ static bool modify_3d_dfs_fixed_page_iter(NodeAllocator* allocator, uint32_t roo
             {
                 free_children_3d_fixed_page(allocator, frame.node_idx, nodes);
             }
-            node.clear_bits();
+            node.unlink_children();
             node.firstchild = UINT32_MAX;
             continue;
         }
@@ -618,7 +708,7 @@ static bool modify_3d_dfs_fixed_page_iter(NodeAllocator* allocator, uint32_t roo
                     nodes[first_child + i].data = node.data;
                     nodes[first_child + i].parent = frame.node_idx;
                     nodes[first_child + i].firstchild = UINT32_MAX;
-                    nodes[first_child + i].clear_bits();
+                    nodes[first_child + i].unlink_children();
                 }
             }
             for (int i = 0; i < 64; i++)
@@ -633,7 +723,7 @@ static bool modify_3d_dfs_fixed_page_iter(NodeAllocator* allocator, uint32_t roo
                 bool modify_child = modify_fn(child.origin, child.size, &data);
                 if (modify_child)
                 {
-                    if (!node.get_bit(i))
+                    if (!node.has_child(i))
                     {
                         nodes[child.node_idx].parent = frame.node_idx;
                     }
@@ -649,7 +739,7 @@ static bool modify_3d_dfs_fixed_page_iter(NodeAllocator* allocator, uint32_t roo
 }
 
 template <typename CreateFunc, typename HomogeneousFunc>
-static uint32_t create_3d_dfs_fixed_page(NodeAllocator* allocator, NodeT* nodes,
+static uint32_t create_3d_dfs_fixed_page(NodeAllocator* allocator, contree_node* nodes,
                                          CreateFunc create_fn, HomogeneousFunc homogeneous_fn,
                                          const glm::vec3& chunk_origin, float chunk_size,
                                          uint32_t max_depth, std::vector<uint32_t>& out_pages)
@@ -662,8 +752,8 @@ static uint32_t create_3d_dfs_fixed_page(NodeAllocator* allocator, NodeT* nodes,
         int depth;
     };
 
-    NodeT root_node;
-    root_node.clear_bits();
+    contree_node root_node;
+    root_node.unlink_children();
     root_node.parent = UINT32_MAX;
     root_node.firstchild = UINT32_MAX;
 
@@ -696,7 +786,7 @@ static uint32_t create_3d_dfs_fixed_page(NodeAllocator* allocator, NodeT* nodes,
     {
         StackFrame frame = stack.back();
         stack.pop_back();
-        NodeT node = nodes[frame.node_idx];
+        contree_node node = nodes[frame.node_idx];
 
         if (homogeneous_fn(frame.origin, frame.size) || frame.depth >= max_depth)
         {
@@ -712,16 +802,16 @@ static uint32_t create_3d_dfs_fixed_page(NodeAllocator* allocator, NodeT* nodes,
                     float child_size = frame.size * 0.25f;
                     glm::vec3 child_origin = frame.origin + child_size * glm::vec3(x, y, z);
 
-                    NodeT child_node;
+                    contree_node child_node;
 
                     bool created = create_fn(child_origin, child_size, &child_node.data);
                     if (created)
                     {
-                        child_node.clear_bits();
+                        child_node.unlink_children();
                         child_node.firstchild = UINT32_MAX;
                         child_node.parent = frame.node_idx;
                         uint32_t flat_idx = x + 4 * y + 16 * z;
-                        nodes[frame.node_idx].set_bit(flat_idx);
+                        nodes[frame.node_idx].set_child(flat_idx);
 
                         nodes[first_child_idx + flat_idx] = child_node;
                         stack.emplace_back(first_child_idx + flat_idx, child_origin, child_size,
@@ -742,10 +832,10 @@ static uint32_t create_3d_dfs_fixed_page(NodeAllocator* allocator, NodeT* nodes,
     return root_idx;
 }
 
-static bool create_3d_dfs_mesh_fixed_page(NodeAllocator* allocator, uint32_t root_idx, NodeT* nodes,
-                                          ame_bvh& bvh, const glm::vec3& chunk_origin,
-                                          float chunk_size, uint32_t max_depth,
-                                          std::vector<uint32_t>& out_pages)
+static bool create_3d_dfs_mesh_fixed_page(NodeAllocator* allocator, uint32_t root_idx,
+                                          contree_node* nodes, ame_bvh& bvh,
+                                          const glm::vec3& chunk_origin, float chunk_size,
+                                          uint32_t max_depth, std::vector<uint32_t>& out_pages)
 {
     struct StackFrame
     {
@@ -755,8 +845,8 @@ static bool create_3d_dfs_mesh_fixed_page(NodeAllocator* allocator, uint32_t roo
         int depth;
     };
 
-    NodeT root_node;
-    root_node.clear_bits();
+    contree_node root_node;
+    root_node.unlink_children();
     root_node.parent = UINT32_MAX;
     root_node.firstchild = UINT32_MAX;
     BVHIntersectAABBInfo root_info;
@@ -766,7 +856,7 @@ static bool create_3d_dfs_mesh_fixed_page(NodeAllocator* allocator, uint32_t roo
         return false;
     }
     root_node.data = 0xfff;
-    root_node.data |= TerrainGen::pack_normal(root_info.normal) << 12;
+    root_node.data |= TerrainGen::pack_vec3_3x4bits(root_info.normal) << 12;
 
     auto allocate_nodes = [&]()
     {
@@ -793,7 +883,7 @@ static bool create_3d_dfs_mesh_fixed_page(NodeAllocator* allocator, uint32_t roo
     {
         StackFrame frame = stack.back();
         stack.pop_back();
-        NodeT node = nodes[frame.node_idx];
+        contree_node node = nodes[frame.node_idx];
 
         if (frame.depth >= max_depth)
         {
@@ -809,20 +899,20 @@ static bool create_3d_dfs_mesh_fixed_page(NodeAllocator* allocator, uint32_t roo
                     float child_size = frame.size * 0.25f;
                     glm::vec3 child_origin = frame.origin + child_size * glm::vec3(x, y, z);
 
-                    NodeT child_node;
+                    contree_node child_node;
 
                     BVHIntersectAABBInfo info;
                     bool created = bvh_aabb_intersect(&info, bvh, 0, child_origin,
                                                       child_origin + child_size);
                     if (created)
                     {
-                        child_node.clear_bits();
+                        child_node.unlink_children();
                         child_node.firstchild = UINT32_MAX;
                         child_node.parent = frame.node_idx;
                         child_node.data = 0xfffu;
-                        child_node.data |= TerrainGen::pack_normal(info.normal) << 12;
+                        child_node.data |= TerrainGen::pack_vec3_3x4bits(info.normal) << 12;
                         uint32_t flat_idx = x + 4 * y + 16 * z;
-                        nodes[frame.node_idx].set_bit(flat_idx);
+                        nodes[frame.node_idx].set_child(flat_idx);
 
                         nodes[first_child_idx + flat_idx] = child_node;
                         stack.emplace_back(first_child_idx + flat_idx, child_origin, child_size,

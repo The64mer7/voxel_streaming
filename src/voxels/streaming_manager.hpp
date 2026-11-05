@@ -56,12 +56,12 @@ public:
         m_page_size = page_size;
 
         uint32_t num_pages = (num_nodes + page_size - 1) / page_size;
-        m_allocator.set_page_count(num_pages);
+        m_allocator.set_page_count(num_pages, 32);
         m_page_lru.resize(num_pages, m_timestamp);
         m_page_parent_index.resize(num_pages, UINT32_MAX);
         m_nodes.resize(num_nodes);
 
-        NodeT root_node;
+        contree_node root_node;
         root_node.childmask.clear();
         root_node.data = 0xff00ff;
         root_node.firstchild = UINT32_MAX;
@@ -71,7 +71,7 @@ public:
         allocated_pages++;
 
         GLbitfield flags = GL_DYNAMIC_STORAGE_BIT | GL_MAP_WRITE_BIT;
-        m_nodes_ssbo.allocate(m_nodes.data(), sizeof(NodeT) * num_nodes, flags);
+        m_nodes_ssbo.allocate(m_nodes.data(), sizeof(contree_node) * num_nodes, flags);
     }
     int allocated_pages = 0;
     void update_lru(uint32_t timestamp, uint32_t* nodes, uint32_t num_nodes)
@@ -246,9 +246,9 @@ public:
         if (use_world_nodes)
             m_nodes_ssbo.set_sub_data(
                 WorldContree::s_nodes.data(),
-                glm::min(WorldContree::s_nodes.size(), m_nodes.size()) * sizeof(NodeT), 0);
+                glm::min(WorldContree::s_nodes.size(), m_nodes.size()) * sizeof(contree_node), 0);
         else
-            m_nodes_ssbo.set_sub_data(m_nodes.data(), m_nodes.size() * sizeof(NodeT), 0);
+            m_nodes_ssbo.set_sub_data(m_nodes.data(), m_nodes.size() * sizeof(contree_node), 0);
     }
 
     void upload_to_gpu(uint32_t begin, uint32_t end)
@@ -258,12 +258,13 @@ public:
         if (use_world_nodes)
         {
             m_nodes_ssbo.set_sub_data(WorldContree::s_nodes.data() + begin,
-                                      (end - begin) * sizeof(NodeT), begin * sizeof(NodeT));
+                                      (end - begin) * sizeof(contree_node),
+                                      begin * sizeof(contree_node));
         }
         else
         {
-            m_nodes_ssbo.set_sub_data(m_nodes.data() + begin, (end - begin) * sizeof(NodeT),
-                                      begin * sizeof(NodeT));
+            m_nodes_ssbo.set_sub_data(m_nodes.data() + begin, (end - begin) * sizeof(contree_node),
+                                      begin * sizeof(contree_node));
         }
     }
 
@@ -290,18 +291,18 @@ public:
         uint32_t end = std::min(start + m_page_size, (uint32_t)m_nodes.size());
 
         for (uint32_t i = start; i < end; i++)
-            if (m_nodes[i].firstchild != NodeT::invalid_offset)
+            if (m_nodes[i].firstchild != contree_node::invalid_offset)
                 unlink_page(page_of_node(m_nodes[i].firstchild));
 
         if (m_nodes[parent_node].firstchild == start)
         {
             m_nodes[parent_node].childmask.clear();
-            m_nodes[parent_node].firstchild = NodeT::invalid_offset;
+            m_nodes[parent_node].firstchild = contree_node::invalid_offset;
         }
         for (uint32_t i = start; i < end; i++)
         {
             m_nodes[i].parent = UINT32_MAX;
-            m_nodes[i].firstchild = NodeT::invalid_offset;
+            m_nodes[i].firstchild = contree_node::invalid_offset;
             m_nodes[i].childmask.clear();
         }
         m_page_parent_index[page_id] = UINT32_MAX;
@@ -318,18 +319,18 @@ public:
         uint32_t end = std::min(start + m_page_size, (uint32_t)m_nodes.size());
 
         for (uint32_t i = start; i < end; i++)
-            if (m_nodes[i].firstchild != NodeT::invalid_offset)
+            if (m_nodes[i].firstchild != contree_node::invalid_offset)
                 unlink_page(page_of_node(m_nodes[i].firstchild));
 
         if (m_nodes[parent_node].firstchild == start)
         {
             m_nodes[parent_node].childmask.clear();
-            m_nodes[parent_node].firstchild = NodeT::invalid_offset;
+            m_nodes[parent_node].firstchild = contree_node::invalid_offset;
         }
         for (uint32_t i = start; i < end; i++)
         {
             m_nodes[i].parent = UINT32_MAX;
-            m_nodes[i].firstchild = NodeT::invalid_offset;
+            m_nodes[i].firstchild = contree_node::invalid_offset;
             m_nodes[i].childmask.clear();
         }
         m_page_lru[page_id] = UINT32_MAX;
@@ -348,7 +349,7 @@ public:
     std::vector<uint32_t> m_page_parent_index;
     std::vector<uint32_t> m_free_pages;
 
-    std::vector<NodeT> m_nodes;
+    std::vector<contree_node> m_nodes;
 
     Ssbo m_nodes_ssbo;
 };

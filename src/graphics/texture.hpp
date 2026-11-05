@@ -13,13 +13,13 @@ struct Texture
         m_internal_format = internal_format;
         glCreateTextures(target, 1, &m_handle);
     }
-    void allocate(GLsizei width, GLsizei height, GLint filter = GL_NEAREST)
+    void allocate(GLsizei width, GLsizei height, GLint filter = GL_NEAREST, int mipmaps = 1)
     {
         m_width = width;
         m_height = height;
         m_depth = 1;
 
-        glTextureStorage2D(m_handle, 1, m_internal_format, width, height);
+        glTextureStorage2D(m_handle, mipmaps, m_internal_format, width, height);
 
         glTextureParameteri(m_handle, GL_TEXTURE_MAG_FILTER, filter);
         glTextureParameteri(m_handle, GL_TEXTURE_MIN_FILTER, filter);
@@ -56,7 +56,9 @@ struct Texture
     GLenum get_internal_format() const { return m_internal_format; }
     GLuint get_handle() const { return m_handle; }
     GLsizei width() const { return m_width; }
+    GLsizei width(int lod) const { return glm::max(m_width >> lod, 1); }
     GLsizei height() const { return m_height; }
+    GLsizei height(int lod) const { return glm::max(m_height >> lod, 1); }
     GLsizei depth() const { return m_depth; }
 
 private:

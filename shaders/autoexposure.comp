@@ -1,0 +1,61 @@
+#version 460 core
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba16f, binding = 0) uniform image2D u_read_img;
+layout(rgba16f, binding = 1) uniform image2D u_write_img;
+
+shared vec4 s_chunk[16][16];
+
+vec4 sample_read_img(ivec2 iuv)
+{
+    return imageLoad(u_read_img, iuv % ivec2(imageSize(u_read_img))); // TODO: discard out of bounds
+}
+
+vec4 geo_mean_region2x2(ivec2 region_iuv)
+{
+    vec4 sum_ln = vec4(0.f);
+    for (int y = 0; y < 2; y++)
+    {
+        for (int x = 0; x < 2; x++)
+        {
+            ivec2 iuv = region_iuv + ivec2(x, y);
+            sum_ln += log(s_chunk[iuv.y][iuv.x]);
+        }
+    }
+    return exp(sum_ln*0.25f);
+}
+
+void main()
+{
+    ivec2 read_size = imageSize(u_read_img);
+    ivec2 write_size = imageSize(u_write_img);
+
+    ivec2 chunk_iuv = ivec2(gl_WorkGroupID.xy) * 16;
+    ivec2 local_iuv = ivec2(gl_LocalInvocationID.xy);
+
+    for (int y = 0; y < 2; y++)
+    {
+        for (int x = 0; x < 2; x++)
+        {
+            ivec2 local = local_iuv * 2 + ivec2(x, y);
+            s_chunk[local.y][local.x] = sample_read_img(chunk_iuv + local);
+        }
+    }
+    barrier();
+    for (int i = 8; i > 0; i /= 2)
+    {
+        if (local_iuv.x < i && local_iuv.y < i)
+            s_chunk[local_iuv.y][local_iuv.x] = geo_mean_region2x2(2 * local_iuv);
+        barrier();
+    }
+    if (all(equal(local_iuv,ivec2(0))))
+    {
+        ivec2 write_pos = ivec2(gl_WorkGroupID.xy);
+
+        if (all(lessThan(write_pos, write_size)))
+        {
+            imageStore(u_write_img, write_pos, s_chunk[0][0]);
+        }
+    }
+}
