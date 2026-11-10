@@ -9,12 +9,14 @@
 
 uniform mat4 u_inv_view;
 uniform mat4 u_inv_proj;
+uniform mat4 u_prev_viewproj;
 
 
 uniform vec3 u_cam_pos;
 uniform uint u_frame_index;
 uniform float u_chunk_size;
 uniform uint u_max_depth;
+uniform int u_gi;
 uniform float u_ao_radius;
 uniform float u_hysteresis;
 
@@ -30,6 +32,7 @@ layout(rgba32ui, binding = 4) uniform uimage2D u_img_requests0;
 layout(rgba32ui, binding = 5) uniform uimage2D u_img_requests1;
 layout(rgba32ui, binding = 6) uniform uimage2D u_img_requests2;
 layout(rgba16f, binding = 7) uniform image2D u_indirect_texture;
+uniform sampler2D u_prev_indirect_texture;
 
 layout(std430, binding = 0) buffer ContreeRayLookupTable
 {
@@ -674,9 +677,9 @@ void write_normal(vec4 normal)
     imageStore(u_normal, screen_coords(), normal);
 }
 
-void write_indirect(vec3 indirect)
+void write_indirect(vec4 indirect)
 {
-    imageStore(u_indirect_texture, screen_coords(), vec4(indirect, 1));
+    imageStore(u_indirect_texture, screen_coords(), indirect);
 }
 
 //void write_request(uint request_node)
@@ -886,6 +889,29 @@ vec3 sample_skybox(vec3 rd)
     return sky + sun_color * sun;
 }
 
+float sample_shadow_factor(vec3 wp)
+{
+    return 1.f;
+}
+
+vec3 sample_direct_light(vec3 wp, vec3 normal)
+{
+    vec3 sun_color = vec3(200, 182, 150)/255.f;
+    float sun_intensity = 2.f;
+    float n_dot_l = max(dot(normal, -sun_dir()), 0.f);
+
+    return sun_intensity * sun_color * n_dot_l * sample_shadow_factor(wp);
+}
+
+vec2 get_prev_uv(vec3 surface_wp)
+{
+    vec4 prev_clip = u_prev_viewproj * vec4(surface_wp, 1.f);
+
+    vec2 prev_ndc = prev_clip.xy / prev_clip.w;
+
+    return clamp(prev_ndc * 0.5f + 0.5f,vec2(0),vec2(0.9999));
+}
+
 void main()
 {
     ivec2 img_size = ivec2(imageSize(u_albedo));
@@ -906,7 +932,7 @@ void main()
     vec3 normal = vec3(0.f);
     float emissive = 0.f;
     vec4 debug = imageLoad(u_debug_texture, screen_coords());
-    vec3 new_indirect = vec3(0);
+    vec4 new_indirect = vec4(0);
 
     if (hit.t >= -0.5f)
     {
@@ -914,21 +940,39 @@ void main()
         normal = get_normal(hit.data);
         emissive = unpack_emissive(hit.data);
 
-        ivec2 pixel = screen_coords() * 2651 + int(u_frame_index)*611191;
-        uint seed = uint(pixel.x) + uint(pixel.y) * uint(imageSize(u_albedo).x);
-
-        vec3 flat_normal = hit.normal;
-        vec3 ao_rd = random_hemisphere_direction(flat_normal, seed);
-        raymarch_hit ao_hit = raymarch_tree(u_chunk_size, pos_along_ray(ro, rd, hit.t) + flat_normal * NORMAL_SIZE, ao_rd);
-        float ao = 1.f;
-        if (ao_hit.t > 0.f)
+        if (u_gi == 1)
         {
-            new_indirect = unpack_color(ao_hit.data) * (1+16*unpack_emissive(ao_hit.data));
-            ao = min(ao_hit.t / u_ao_radius, 1.f);
+            ivec2 pixel = screen_coords() * 2651 + int(u_frame_index)*611191;
+            uint seed = uint(pixel.x) + uint(pixel.y) * uint(imageSize(u_albedo).x);
+
+            vec3 flat_normal = hit.normal;
+            vec3 ao_ro = pos_along_ray(ro, rd, hit.t) + flat_normal * NORMAL_SIZE;
+            vec3 ao_rd = random_hemisphere_direction(flat_normal, seed);
+            raymarch_hit ao_hit = raymarch_tree(u_chunk_size, ao_ro, ao_rd);
+            float ao = 1.f;
+            if (ao_hit.t > 0.f)
+            {
+                new_indirect.rgb = unpack_color(ao_hit.data) * (1+16*unpack_emissive(ao_hit.data));
+                ao = min(ao_hit.t / u_ao_radius, 1.f);
+            }
+            else
+                new_indirect.rgb = sample_skybox(ao_rd);
+            new_indirect.a = ao;
+            
+            vec2 prev_uv = get_prev_uv(pos_along_ray(ro, rd, hit.t));
+            ivec2 prev_coords = ivec2(prev_uv * vec2(imageSize(u_albedo)));
+            vec4 accum_indirect = texelFetch(u_prev_indirect_texture, prev_coords, 0);
+
+            if (u_gi == 1)
+            {
+                accum_indirect = mix(new_indirect, accum_indirect, u_hysteresis);
+                write_indirect(accum_indirect);
+            }
         }
-        else
-            new_indirect = sample_skybox(ao_rd);
-        debug.a = mix(ao, debug.a, u_hysteresis);
+    }
+    else
+    {
+        write_indirect(vec4(0));
     }
 
     debug.r = hit.iteration_count / float(MAX_ITERATIONS) * 4;
@@ -942,10 +986,6 @@ void main()
     write_albedo(albedo);
     write_depth(hit.t);
     write_debug(debug);
-
-    vec3 accum_indirect = imageLoad(u_indirect_texture, screen_coords()).rgb;
-    accum_indirect = mix(new_indirect, accum_indirect, u_hysteresis);
-    write_indirect(accum_indirect);
 
     barrier();
     if (hit.t >= -0.5f)

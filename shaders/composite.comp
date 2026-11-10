@@ -439,8 +439,8 @@ void main()
     }
     if (u_display_texture == DISPLAY_AO)
     {
-        vec4 debug = texelFetch(u_debug_texture, uvi, 0);
-        imageStore(u_final, uvi, vec4(vec3(debug.w),1));
+        float ao = imageLoad(u_indirect_texture, uvi).a;
+        imageStore(u_final, uvi, vec4(vec3(ao),1));
     }
     if (u_display_texture == DISPLAY_NORMAL)
     {
@@ -487,7 +487,8 @@ void main()
         }
         vec4 debug = texelFetch(u_debug_texture, uvi, 0);
         //float ao = texture(u_ao, uv).r;
-        float ao = debug.a;
+        float ao = imageLoad(u_indirect_texture, uvi).a;
+//        float ao = debug.a;
         vec3 incoming_light = calculate_incoming_light(uvi, ao);
         vec3 hdr = incoming_light;
         imageStore(u_final, uvi, vec4(hdr, 1.f));
@@ -518,7 +519,7 @@ void main()
     }
     if (u_display_texture == DISPLAY_HZB)
     {
-        int lod = int(u_frame_index) / 32;
+        int lod = int(u_frame_index) / 512;
         lod = lod % textureQueryLevels(u_hzb);
         vec2 minmax = textureLod(u_hzb, uv, lod).xy;
         imageStore(u_final, uvi, vec4(u_brightness * minmax, 0, 1));

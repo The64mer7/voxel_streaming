@@ -6,7 +6,7 @@ uniform float u_thickness;
 uniform int u_read_lod;
 
 uniform sampler2D u_depth_buffer;
-layout(rg16f, binding = 0) uniform readonly image2D u_read;
+uniform sampler2D u_read;
 layout(rg16f, binding = 1) uniform writeonly image2D u_write;
 
 
@@ -35,7 +35,7 @@ void main()
     for(int y = 0; y < 2; y++)
     for(int x = 0; x < 2; x++)
     {
-        vec2 read_minmax = imageLoad(u_read, read_uvi + ivec2(x, y)).xy;
+        vec2 read_minmax = texelFetch(u_read, read_uvi + ivec2(x, y), u_read_lod).xy;
         minmax.x = min(minmax.x, read_minmax.x);
         minmax.y = max(minmax.y, read_minmax.y);
     }

@@ -16,5 +16,6 @@ void main()
     vec4 hdr = imageLoad(u_screen_texture, iuv);
     vec4 ldr = exposure * hdr / (vec4(1) + exposure * hdr);
     ldr = u_exposure * hdr / (vec4(1) + u_exposure * hdr);
+    ldr = max(ldr, vec4(0.f));
     imageStore(u_screen_texture, iuv, vec4(ldr.rgb, 1));
 }

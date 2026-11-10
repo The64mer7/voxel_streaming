@@ -98,7 +98,8 @@ void main()
     vec3 ao_ro = ro + rd * depth;
     for(int i = 0; i < 8; i++)
     {
-        vec3 ao_rd = hemisphere_dir(normal, i);
+        vec3 ao_rd = hemisphere_dir(normal, i)/(normal * 5);
+        ao_rd = normalize(ao_rd);
         vec3 ao_end = ao_ro + ao_rd * u_radius;
 
         vec4 ao_end_homogeneous = vec4(ao_end, 1.f);

@@ -1,0 +1,371 @@
+#version 460 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+uniform sampler2D u_hzb;
+uniform sampler2D u_normal;
+uniform sampler2D u_albedo;
+uniform mat4 u_proj;
+uniform mat4 u_inv_proj;
+uniform mat4 u_view;
+uniform mat4 u_inv_view;
+uniform vec3 u_cam_pos;
+uniform uint u_frame_index;
+uniform float u_hysteresis;
+uniform float u_radius;
+
+layout(rgba16f, binding = 0) uniform image2D u_indirect;
+layout(rgba16f, binding = 1) uniform image2D u_debug_texture;
+
+const int MAX_TRAVERSAL_STEPS = 512;
+const float MAX_RAY_DISTANCE = 64.0;
+const float SURFACE_BIAS = 0.05;
+const float CELL_STEP_BIAS = 1e-4;
+
+struct raymarch_hit
+{
+    bool hit;
+    vec3 pos;
+    int it;
+};
+
+bool project_to_uv(vec3 world_pos, out vec2 uv, out vec4 clip)
+{
+    clip = u_proj * u_view * vec4(world_pos, 1.0);
+    if (clip.w <= 0.0)
+        return false;
+
+    vec2 ndc = clip.xy / clip.w;
+    if (any(greaterThan(abs(ndc), vec2(1.0))))
+        return false;
+
+    uv = ndc * 0.5 + 0.5;
+    return true;
+}
+
+void create_ray(out vec3 ro, out vec3 rd, ivec2 pixel, ivec2 image_size)
+{
+    vec2 ndc = (vec2(pixel) + 0.5) / vec2(image_size) * 2.0 - 1.0;
+    vec4 clip = u_inv_proj * vec4(ndc, -1.0, 1.0);
+    clip /= clip.w;
+    vec4 world_pos = u_inv_view * clip;
+
+    ro = u_cam_pos;
+    rd = normalize(world_pos.xyz - ro);
+}
+
+vec3 get_flat_normal(ivec2 pixel)
+{
+    uint packed_normal = uint(round(texelFetch(u_normal, pixel, 0).w * 64.0));
+    return vec3(
+        float((packed_normal >> 0) & 3u) - 1.0,
+        float((packed_normal >> 2) & 3u) - 1.0,
+        float((packed_normal >> 4) & 3u) - 1.0
+    );
+}
+
+float distance_to_next_cell(
+    vec4 clip,
+    vec4 clip_direction,
+    vec2 uv,
+    int lod,
+    float max_distance)
+{
+    ivec2 cell_count = textureSize(u_hzb, lod);
+    vec2 cell = floor(uv * vec2(cell_count));
+    float nearest_boundary = max_distance;
+
+    for (int axis = 0; axis < 2; ++axis)
+    {
+        float clip_position = axis == 0 ? clip.x : clip.y;
+        float clip_velocity = axis == 0 ? clip_direction.x : clip_direction.y;
+        float uv_velocity_numerator =
+            clip_velocity * clip.w - clip_position * clip_direction.w;
+        if (abs(uv_velocity_numerator) < 1e-8)
+            continue;
+
+        float step_direction = sign(uv_velocity_numerator);
+        float boundary_uv = (cell[axis] + (step_direction > 0.0 ? 1.0 : 0.0)) /
+                            float(cell_count[axis]);
+        float boundary_ndc = boundary_uv * 2.0 - 1.0;
+        float boundary_clip = boundary_ndc * clip.w;
+        float denominator = clip_velocity - boundary_ndc * clip_direction.w;
+        if (abs(denominator) < 1e-8)
+            continue;
+
+        float distance = (boundary_clip - clip_position) / denominator;
+        if (distance > CELL_STEP_BIAS)
+            nearest_boundary = min(nearest_boundary, distance);
+    }
+
+    return nearest_boundary;
+}
+
+void ray_distance_range(
+    vec3 ray_pos,
+    vec3 ray_direction,
+    float segment_length,
+    out vec2 distance_range)
+{
+    vec3 offset = ray_pos - u_cam_pos;
+    float closest_distance = clamp(-dot(offset, ray_direction), 0.0, segment_length);
+    distance_range.x = length(offset + ray_direction * closest_distance);
+    distance_range.y = max(length(offset), length(offset + ray_direction * segment_length));
+}
+
+bool distance_interval_entry(
+    vec3 ray_origin,
+    vec3 ray_direction,
+    float start_distance,
+    float end_distance,
+    vec2 terrain_distance,
+    out float hit_distance)
+{
+    vec3 offset = ray_origin - u_cam_pos;
+    float at_start = length(offset + ray_direction * start_distance);
+    if (at_start >= terrain_distance.x && at_start <= terrain_distance.y)
+    {
+        hit_distance = start_distance;
+        return true;
+    }
+
+    float best_distance = end_distance + 1.0;
+    for (int bound_index = 0; bound_index < 2; ++bound_index)
+    {
+        float radius = bound_index == 0 ? terrain_distance.x : terrain_distance.y;
+        float half_b = dot(offset, ray_direction);
+        float discriminant = half_b * half_b -
+                             (dot(offset, offset) - radius * radius);
+        if (discriminant < 0.0)
+            continue;
+
+        float root = sqrt(discriminant);
+        float roots[2] = float[2](-half_b - root, -half_b + root);
+        for (int root_index = 0; root_index < 2; ++root_index)
+        {
+            float candidate = roots[root_index];
+            if (candidate < start_distance || candidate > end_distance ||
+                candidate >= best_distance)
+                continue;
+
+            float candidate_distance = length(offset + ray_direction * candidate);
+            if (candidate_distance >= terrain_distance.x - 1e-4 &&
+                candidate_distance <= terrain_distance.y + 1e-4)
+                best_distance = candidate;
+        }
+    }
+
+    if (best_distance <= end_distance)
+    {
+        hit_distance = best_distance;
+        return true;
+    }
+    return false;
+}
+
+raymarch_hit raymarch_depth_buffer(vec3 ray_origin, vec3 ray_direction)
+{
+    raymarch_hit hit;
+    hit.hit = false;
+    hit.pos = vec3(0.0);
+    hit.it = 0;
+
+    vec4 clip_direction = u_proj * u_view * vec4(ray_direction, 0.0);
+    float ray_length = 0.0;
+    int max_lod = textureQueryLevels(u_hzb) - 1;
+    for (int iteration = 0; iteration < MAX_TRAVERSAL_STEPS; ++iteration)
+    {
+        hit.it = iteration;
+        if (ray_length >= MAX_RAY_DISTANCE)
+            break;
+
+        vec3 ray_pos = ray_origin + ray_direction * ray_length;
+        vec2 uv;
+        vec4 clip;
+        if (!project_to_uv(ray_pos, uv, clip))
+            break;
+
+        bool advanced = false;
+        for (int lod = max_lod; lod >= 0; --lod)
+        {
+            ivec2 cell_count = textureSize(u_hzb, lod);
+            ivec2 cell = clamp(
+                ivec2(floor(uv * vec2(cell_count))),
+                ivec2(0),
+                cell_count - 1
+            );
+            vec2 terrain_distance = texelFetch(u_hzb, cell, lod).xy;
+
+            float segment_length = min(
+                distance_to_next_cell(
+                    clip, clip_direction, uv, lod, MAX_RAY_DISTANCE - ray_length),
+                MAX_RAY_DISTANCE - ray_length
+            );
+            if (segment_length <= CELL_STEP_BIAS)
+            {
+                ray_length += CELL_STEP_BIAS;
+                advanced = true;
+                break;
+            }
+
+            vec2 ray_distances;
+            ray_distance_range(ray_pos, ray_direction, segment_length, ray_distances);
+            // HZB depth is radial distance from the camera, not projected Z.
+            bool overlaps = terrain_distance.y >= 0.0 &&
+                            ray_distances.y >= terrain_distance.x &&
+                            ray_distances.x <= terrain_distance.y;
+            if (!overlaps)
+            {
+                ray_length += segment_length + CELL_STEP_BIAS;
+                advanced = true;
+                break;
+            }
+
+            if (lod == 0)
+            {
+                float hit_distance;
+                if (distance_interval_entry(
+                        ray_origin, ray_direction, ray_length,
+                        ray_length + segment_length, terrain_distance,
+                        hit_distance))
+                {
+                    vec3 hit_pos = ray_origin + ray_direction * hit_distance;
+                    vec2 hit_uv;
+                    vec4 hit_clip;
+                    if (project_to_uv(hit_pos, hit_uv, hit_clip))
+                    {
+                        hit.hit = true;
+                        hit.pos = vec3(hit_uv, length(hit_pos - u_cam_pos));
+                    }
+                    return hit;
+                }
+
+                ray_length += segment_length + CELL_STEP_BIAS;
+                advanced = true;
+                break;
+            }
+        }
+
+        if (!advanced)
+            break;
+    }
+
+    return hit;
+}
+
+uint hash_u1(uint v)
+{
+    v ^= v >> 16u;
+    v *= 0x7feb352du;
+    v ^= v >> 15u;
+    v *= 0x846ca68bu;
+    v ^= v >> 16u;
+    return v;
+}
+
+vec3 random_hemisphere_direction(vec3 normal, uint seed)
+{
+    float u1 = float(hash_u1(seed) >> 8u) * (1.0f / 16777216.0f);
+    float u2 = float(hash_u1(seed ^ 0x9e3779b9u) >> 8u) * (1.0f / 16777216.0f);
+
+    float radius = sqrt(u1);
+    float angle = 6.28318530718f * u2;
+    vec3 local_dir = vec3(
+        radius * cos(angle),
+        radius * sin(angle),
+        sqrt(max(0.0f, 1.0f - u1))
+    );
+
+    vec3 reference = abs(normal.z) < 0.999f ? vec3(0.0f, 0.0f, 1.0f)
+                                             : vec3(0.0f, 1.0f, 0.0f);
+    vec3 tangent = normalize(cross(reference, normal));
+    vec3 bitangent = cross(normal, tangent);
+
+    return normalize(tangent * local_dir.x +
+                     bitangent * local_dir.y +
+                     normal * local_dir.z);
+}
+
+vec3 sun_dir()
+{
+    return normalize(vec3(1, -1, 1));
+}
+
+vec3 sample_skybox(vec3 rd)
+{
+    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+
+    vec3 horizon_color = vec3(1.0, 0.55, 0.2);
+    vec3 zenith_color = vec3(0.25, 0.5, 0.9);
+    vec3 sky = mix(horizon_color, zenith_color, t);
+
+    vec3 sun_color = vec3(1.0, 0.85, 0.55) * 10.0;
+    float sun = smoothstep(0.9995, 0.9998, dot(rd, -sun_dir()));
+
+    return sky + sun_color * sun;
+}
+
+void main()
+{
+    ivec2 uvi = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 tex_size = textureSize(u_hzb, 0);
+    if (any(greaterThanEqual(uvi, tex_size)))
+        return;
+
+    vec3 ro;
+    vec3 rd;
+    create_ray(ro, rd, uvi, tex_size);
+    vec3 normal = get_flat_normal(uvi);
+    float depth = texelFetch(u_hzb, uvi, 0).x;
+    if (depth < 0.0 || dot(normal, normal) < 0.5)
+    {
+        imageStore(u_indirect, uvi, vec4(0.0));
+        return;
+    }
+    normal = normalize(normal);
+
+    ivec2 pixel = uvi * 2651 + int(u_frame_index) * 611191;
+    uint seed = uint(pixel.x) + uint(pixel.y) * uint(textureSize(u_albedo, 0).x);
+    vec3 reflected = random_hemisphere_direction(normal, seed);
+    reflected = reflect(rd, normal);
+
+    vec3 world_pos = ro + rd * depth;
+    vec2 uv = (vec2(uvi) + 0.5) / vec2(tex_size);
+    vec3 trace_ro = vec3(uv, depth - 0.5f);
+    vec3 ray_origin = world_pos + normal * SURFACE_BIAS;
+    raymarch_hit hit = raymarch_depth_buffer(ray_origin, reflected);
+
+    vec3 indirect = sample_skybox(reflected);
+    float emissive = 0.0f;
+    if (hit.hit)
+    {
+        ivec2 albedo_size = textureSize(u_albedo, 0);
+        ivec2 hit_pixel = clamp(
+            ivec2(hit.pos.xy * vec2(albedo_size)),
+            ivec2(0),
+            albedo_size - 1
+        );
+        indirect = texelFetch(u_albedo, hit_pixel, 0).rgb;
+        ivec2 debug_size = imageSize(u_debug_texture);
+        ivec2 debug_pixel = clamp(
+            ivec2(hit.pos.xy * vec2(debug_size)),
+            ivec2(0),
+            debug_size - 1
+        );
+        emissive = imageLoad(u_debug_texture, debug_pixel).b;
+    }
+
+    vec3 prev_indirect = imageLoad(u_indirect, uvi).rgb;
+    vec4 debug = imageLoad(u_debug_texture, uvi);
+    float prev_ao = debug.a;
+    indirect = mix((1.0f + 16.0f * emissive) * indirect, prev_indirect, u_hysteresis);
+    float ao = hit.hit
+        ? min(length((trace_ro - hit.pos) / vec3(1.0f, 1.0f, 1.0f)) / u_radius, 1.0f)
+        : prev_ao;
+    float new_ao = mix(ao, prev_ao, u_hysteresis);
+    debug.a = new_ao;
+
+    imageStore(u_indirect, uvi, vec4(indirect, 1.0));
+    imageStore(u_debug_texture, uvi, debug);
+
+}

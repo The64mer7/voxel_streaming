@@ -42,13 +42,13 @@ vec3 get_flat_normal(ivec2 uvi)
     return normal;
 }
 
-vec3 calculate_voxel_pos(ivec2 iuv)
+vec3 calculate_voxel_pos(ivec2 iuv, out vec3 world_pos)
 {
     float depth = imageLoad(u_depth, iuv).x;
     vec3 ro;
     vec3 rd;
     create_ray(iuv, ro, rd);
-    vec3 world_pos = ro + rd * depth - get_flat_normal(iuv) * u_voxel_size * 0.25f;
+    world_pos = ro + rd * depth - get_flat_normal(iuv) * u_voxel_size * 0.25f;
     vec3 voxel_pos = floor(world_pos / u_voxel_size);
     return voxel_pos;
 }
@@ -61,28 +61,30 @@ void main()
     if (any(greaterThanEqual(iuv, img_size)))
         return;
 
-    
-    vec3 ref_voxel_pos = calculate_voxel_pos(iuv);
-
+    vec3 ref_wp;
+    vec3 ref_voxel_pos = calculate_voxel_pos(iuv, ref_wp);
+    float ref_depth = imageLoad(u_depth, iuv).x;
     float ao = 0.f;
     vec4 indirect = vec4(0);
-    int sample_count = 0;
+    float sample_weight = 0;
     for (int i = -u_blur_kernel_half_size; i <= u_blur_kernel_half_size; i++)
     {
         ivec2 coord = clamp(iuv + ivec2(i) * u_blur_dir, ivec2(0), img_size - 1);
         float ao_sample = imageLoad(u_debug_texture, coord).w;
         float depth_sample = imageLoad(u_depth, coord).x;
         vec4 indirect_sample = imageLoad(u_indirect_texture, coord);
-        vec3 voxel_pos_sample = calculate_voxel_pos(coord);
+        
+        vec3 wp_sample;
+        vec3 voxel_pos_sample = calculate_voxel_pos(coord, wp_sample);
+        float blur_weight = voxel_pos_sample == ref_voxel_pos ? 1.f : 0.f;
+        
 
-        bool is_same_edge = ref_voxel_pos == voxel_pos_sample;
-
-        ao += is_same_edge ? ao_sample : 0.f;
-        indirect += is_same_edge ? indirect_sample : vec4(0.f);
-        sample_count += int(is_same_edge);
+        ao += ao_sample * blur_weight;
+        indirect += indirect_sample * blur_weight;
+        sample_weight += blur_weight;
     }
-    ao /= sample_count;
-    indirect /= sample_count;
+    ao /= sample_weight;
+    indirect /= sample_weight;
     barrier();
     vec4 debug = imageLoad(u_debug_texture, iuv);
     imageStore(u_debug_texture, iuv, vec4(debug.xyz, ao));
