@@ -954,8 +954,9 @@ void main()
             {
                 float dist_sq = ao_hit.t * ao_hit.t;
                 float attenuation = 16.f / max(dist_sq, 1.f);
-
-                new_indirect.rgb = unpack_color(ao_hit.data) * (1 + unpack_emissive(ao_hit.data) * attenuation);
+                vec3 hit_albedo = unpack_color(ao_hit.data);
+                float hit_emissive_factor = unpack_emissive(ao_hit.data);
+                new_indirect.rgb = hit_albedo + hit_albedo * hit_emissive_factor * attenuation;
                 ao = min(ao_hit.t / u_ao_radius, 1.f);
             }
             else

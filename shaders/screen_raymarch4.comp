@@ -376,8 +376,9 @@ void main()
         );
 
         emissive = imageLoad(u_debug_texture, debug_pixel).b;
-
-        indirect.rgb = hit_albedo * hit_indirect.rgb + hit_albedo * emissive * 16.f;
+        float dist_sq = hit.t * hit.t;
+        float attenuation = 16.f / max(dist_sq, 1.f);
+        indirect.rgb = hit_albedo * hit_indirect.rgb + hit_albedo * emissive * attenuation;
         indirect.a = min(hit.t / u_radius, 1.f);
     }
     else
