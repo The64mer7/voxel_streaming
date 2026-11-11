@@ -49,6 +49,14 @@ inline void debug_print_tree(contree_node* nodes, uint32_t idx = 0, uint32_t dep
         }
 }
 
+enum GI
+{
+    GI_DDGI,
+    GI_SCREEN,
+    GI_WORLD,
+    GI_NONE
+};
+
 class Application
 {
 public:
@@ -74,51 +82,38 @@ public:
         streaming_manager.init(num_nodes, 64);
         streaming_manager.cam = &camera;
         // TODO:
-        if (!sp_raymarch.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/raymarch.comp"))
+        if (!sp_raymarch.load_compute("shaders/raymarch.comp"))
             exit(1);
-        if (!sp_irradiance_raymarch.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/raymarch_irradiance.comp"))
+        if (!sp_irradiance_raymarch.load_compute("shaders/raymarch_irradiance.comp"))
             exit(1);
-        if (!sp_aabb.load_graphics("C:/Users/jaros/Desktop/voxel_streaming/shaders/aabb.vert",
-                                   "C:/Users/jaros/Desktop/voxel_streaming/shaders/aabb.frag"))
+        if (!sp_aabb.load_graphics("shaders/aabb.vert", "shaders/aabb.frag"))
             exit(1);
-        if (!sp_probes_debug.load_graphics(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug.vert",
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug.frag"))
+        if (!sp_probes_debug.load_graphics("shaders/probe_debug.vert", "shaders/probe_debug.frag"))
             exit(1);
-        if (!sp_probes_debug_ray.load_graphics(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug_ray.vert",
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/probe_debug_ray.frag"))
+        if (!sp_probes_debug_ray.load_graphics("shaders/probe_debug_ray.vert",
+                                               "shaders/probe_debug_ray.frag"))
             exit(1);
-        if (!sp_request_bitmask_gen.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/request_bitmask_gen.comp"))
+        if (!sp_request_bitmask_gen.load_compute("shaders/request_bitmask_gen.comp"))
             exit(1);
-        if (!sp_compact_requests.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/compact_requests_fix.comp"))
+        if (!sp_compact_requests.load_compute("shaders/compact_requests_fix.comp"))
             exit(1);
-        if (!sp_composite.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/composite.comp"))
+        if (!sp_composite.load_compute("shaders/composite.comp"))
             exit(1);
-        if (!sp_ao.load_compute("C:/Users/jaros/Desktop/voxel_streaming/shaders/ssao.comp"))
+        if (!sp_ao.load_compute("shaders/ssao.comp"))
             exit(1);
-        if (!sp_edge_blur.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/edge_blur.comp"))
+        if (!sp_edge_blur.load_compute("shaders/edge_blur.comp"))
             exit(1);
-        if (!sp_autoexposure.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/autoexposure.comp"))
+        if (!sp_autoexposure.load_compute("shaders/autoexposure.comp"))
             exit(1);
-        if (!sp_screen_postprocess.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/screen_postprocess.comp"))
+        if (!sp_screen_postprocess.load_compute("shaders/screen_postprocess.comp"))
             exit(1);
-        if (!sp_hzb_gen.load_compute("C:/Users/jaros/Desktop/voxel_streaming/shaders/hzb_gen.comp"))
+        if (!sp_hzb_gen.load_compute("shaders/hzb_gen.comp"))
             exit(1);
-        if (!sp_screen_space_raymarch.load_compute(
-                "C:/Users/jaros/Desktop/voxel_streaming/shaders/screen_raymarch4.comp"))
+        if (!sp_screen_space_raymarch.load_compute("shaders/screen_raymarch4.comp"))
             exit(1);
 
-        uint32_t w = 800;
-        uint32_t h = 600;
+        uint32_t w = 1600;
+        uint32_t h = 900;
         albedo_texture.create(GL_RGBA8);
         albedo_texture.allocate(w, h);
 
@@ -178,7 +173,7 @@ public:
 
         probes_colors.create(GL_RGBA16F, GL_TEXTURE_2D_ARRAY);
         probes_colors.allocate_3d(probe_resolution * probe_counts.x,
-                                  probe_resolution * probe_counts.y, probe_counts.z, GL_LINEAR);
+                                  probe_resolution * probe_counts.y, probe_counts.z, GL_NEAREST);
 
         glm::vec4 initial_color(0.f);
         glClearTexImage(probes_colors.get_handle(), 0, GL_RGBA, GL_FLOAT, &initial_color);
@@ -450,12 +445,15 @@ public:
     void screen_space_gi_pass()
     {
         Texture& indirect_texture = indirect_textures[frame_index % 2];
+        Texture& prev_indirect_texture = indirect_textures[(frame_index + 1) % 2];
 
         profiling_timer.begin_gpu("ssgi");
         sp_screen_space_raymarch.bind();
         sp_screen_space_raymarch.set_sampler("u_hzb", hzb_texture.get_handle(), 0);
         sp_screen_space_raymarch.set_sampler("u_normal", normals_texture.get_handle(), 1);
         sp_screen_space_raymarch.set_sampler("u_albedo", albedo_texture.get_handle(), 2);
+        sp_screen_space_raymarch.set_sampler("u_prev_indirect_texture",
+                                             prev_indirect_texture.get_handle(), 3);
         sp_screen_space_raymarch.set_image("u_indirect", indirect_texture.get_handle(), 0,
                                            GL_READ_WRITE, indirect_texture.get_internal_format());
         sp_screen_space_raymarch.set_image("u_debug_texture", debug_texture.get_handle(), 1,
@@ -463,6 +461,9 @@ public:
         sp_screen_space_raymarch.set_mat4("u_inv_view", glm::inverse(camera.get_view_matrix()));
         sp_screen_space_raymarch.set_mat4("u_inv_proj",
                                           glm::inverse(camera.get_projection_matrix()));
+
+        sp_screen_space_raymarch.set_mat4("u_prev_viewproj",
+                                          camera.get_projection_matrix() * prev_view_mat);
         sp_screen_space_raymarch.set_mat4("u_view", camera.get_view_matrix());
         sp_screen_space_raymarch.set_mat4("u_proj", camera.get_projection_matrix());
         sp_screen_space_raymarch.set_vec3("u_cam_pos", camera.get_position());
@@ -517,7 +518,7 @@ public:
         sp_raymarch.set_float("u_chunk_size", chunk_size);
         sp_raymarch.set_float("u_ao_radius", ao_radius);
         sp_raymarch.set_float("u_hysteresis", hysteresis);
-        sp_raymarch.set_int("u_gi", gi);
+        sp_raymarch.set_int("u_gi", current_gi == GI_WORLD);
 
         sp_raymarch.set_uint("u_max_depth", max_depth);
 
@@ -697,7 +698,7 @@ public:
         sp_composite.set_float("u_probe_spacing", probe_spacing);
         sp_composite.set_uvec3("u_probe_counts", probe_counts);
         sp_composite.set_int("u_probe_resolution", probe_resolution);
-        sp_composite.set_int("u_ddgi", ddgi);
+        sp_composite.set_int("u_ddgi", current_gi == GI_DDGI);
 
         probes.bind_base(0);
 
@@ -793,11 +794,14 @@ public:
             old_stream(buffer_slot);
             // stream_nodes();
         }
+
+        if (!accumulate)
+            prev_view_mat = camera.get_view_matrix();
         irradiance_pass();
         primary_ray_pass();
         stream_requests_pass();
         hzb_generate_pass();
-        if (screen_space_gi)
+        if (current_gi == GI_SCREEN)
             screen_space_gi_pass();
         ao_pass();
         ao_blur_pass();
@@ -841,9 +845,13 @@ public:
             ImGui::SliderInt("max_raymarch_depth", &max_depth, 0, 8);
             ImGui::SliderFloat("expousure", &exposure, 0.f, 5.f);
 
-            ImGui::Checkbox("ddgi", &ddgi);
-            ImGui::Checkbox("gi", &gi);
-            ImGui::Checkbox("screen_space_gi", &screen_space_gi);
+            ImGui::Checkbox("relocate_on_move", &accumulate);
+            if (ImGui::RadioButton("ddgi", current_gi == GI_DDGI))
+                current_gi = GI_DDGI;
+            if (ImGui::RadioButton("ssgi", current_gi == GI_SCREEN))
+                current_gi = GI_SCREEN;
+            if (ImGui::RadioButton("rtgi", current_gi == GI_WORLD))
+                current_gi = GI_WORLD;
         }
         ImGui::End();
 
@@ -944,7 +952,7 @@ public:
             static uint32_t brush_color = 0xfff;
             if (is_viewport_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             {
-
+                srand(time(nullptr));
                 if (glm::all(glm::greaterThanEqual(mouse_pos, glm::vec2(0))) &&
                     glm::all(
                         glm::lessThan(mouse_pos, {depth_texture.width(), depth_texture.height()})))
@@ -1177,7 +1185,7 @@ public:
     uint32_t width;
     uint32_t height;
     bool is_running;
-    int target_fps = 144;
+    int target_fps = 50;
 
     // Your application variables here:
     uint32_t buffer_slot = 0;
@@ -1251,13 +1259,12 @@ public:
     glm::ivec3 probe_counts = {32, 32, 32};
 
     uint32_t display_texture = 0;
-    bool ddgi = false;
-    bool screen_space_gi = false;
-    bool gi = true;
+    GI current_gi = GI_SCREEN;
+    bool accumulate = true;
     float display_brightness = 1.f;
     float ao_radius = 32.f;
     float ao_bias = 0.1f;
-    float viewport_scale = 1.5f;
+    float viewport_scale = 1.f;
     float exposure = 1.f;
     float probe_spacing = 8.f;
     float probe_point_size = 3.f;

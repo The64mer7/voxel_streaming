@@ -9,6 +9,8 @@ uniform mat4 u_proj;
 uniform mat4 u_inv_proj;
 uniform mat4 u_view;
 uniform mat4 u_inv_view;
+uniform mat4 u_prev_viewproj;
+
 uniform vec3 u_cam_pos;
 uniform uint u_frame_index;
 uniform float u_hysteresis;
@@ -16,6 +18,7 @@ uniform float u_radius;
 
 layout(rgba16f, binding = 0) uniform image2D u_indirect;
 layout(rgba16f, binding = 1) uniform image2D u_debug_texture;
+uniform sampler2D u_prev_indirect_texture;
 
 const int MAX_TRAVERSAL_STEPS = 64;
 const float MAX_RAY_DISTANCE = 64.0;
@@ -28,6 +31,7 @@ struct raymarch_hit
     vec3 pos;
     vec2 uv;
     int it;
+    float t;
 };
 
 vec4 world_to_clip(vec3 world_pos)
@@ -160,6 +164,7 @@ raymarch_hit raymarch_depth_buffer(vec3 world_pos, vec3 world_ray)
     hit.pos = vec3(0.0);
     hit.uv = vec2(0.0);
     hit.it = 0;
+    hit.t = 0.0;
 
     vec3 ray_direction = normalize(world_ray);
     vec4 clip_ray = world_ray_to_clip(ray_direction);
@@ -197,6 +202,7 @@ raymarch_hit raymarch_depth_buffer(vec3 world_pos, vec3 world_ray)
                 hit.hit = true;
                 hit.pos = ray_pos;
                 hit.uv = screen_pos.xy;
+                hit.t = t;
                 return hit;
             }
 
@@ -302,6 +308,15 @@ vec3 sample_direct_light(vec3 wp, vec3 normal)
     return sun_intensity * sun_color * n_dot_l * sample_shadow_factor(wp);
 }
 
+vec2 get_prev_uv(vec3 surface_wp)
+{
+    vec4 prev_clip = u_prev_viewproj * vec4(surface_wp, 1.f);
+
+    vec2 prev_ndc = prev_clip.xy / prev_clip.w;
+
+    return clamp(prev_ndc * 0.5f + 0.5f,vec2(0),vec2(0.9999));
+}
+
 vec3 sample_skybox(vec3 ray_direction)
 {
     float t = clamp(ray_direction.y * 0.5 + 0.5, 0.0, 1.0);
@@ -341,19 +356,17 @@ void main()
     vec3 trace_origin = world_pos + normal * SURFACE_BIAS;
     raymarch_hit hit = raymarch_depth_buffer(trace_origin, reflected);
 
-    vec3 indirect = sample_skybox(reflected);
+    vec4 indirect = vec4(0);
+
     float emissive = 0.0;
     if (hit.hit)
     {
         ivec2 albedo_size = textureSize(u_albedo, 0);
-        ivec2 hit_pixel = clamp(
-            ivec2(hit.uv * vec2(albedo_size)),
-            ivec2(0),
-            albedo_size - 1
-        );
-        indirect = imageLoad(u_indirect, hit_pixel).rgb;
-        vec3 hit_albedo = texelFetch(u_albedo, hit_pixel, 0).rgb;
-        indirect = hit_albedo * indirect;
+        
+        vec2 prev_hit_uv = get_prev_uv(hit.pos);
+        vec3 hit_albedo = texture(u_albedo, hit.uv).rgb;
+
+        vec4 hit_indirect = texture(u_prev_indirect_texture, prev_hit_uv);
 
         ivec2 debug_size = imageSize(u_debug_texture);
         ivec2 debug_pixel = clamp(
@@ -361,20 +374,26 @@ void main()
             ivec2(0),
             debug_size - 1
         );
+
         emissive = imageLoad(u_debug_texture, debug_pixel).b;
-        indirect += hit_albedo * emissive;
+
+        indirect.rgb = hit_albedo * hit_indirect.rgb + hit_albedo * emissive * 16.f;
+        indirect.a = min(hit.t / u_radius, 1.f);
+    }
+    else
+    {
+        indirect.rgb = sample_skybox(reflected);
+        indirect.a = 1.f;
     }
 
-    vec3 prev_indirect = imageLoad(u_indirect, pixel).rgb;
+    vec2 prev_uv = get_prev_uv(world_pos);
+    vec4 prev_indirect = texture(u_prev_indirect_texture, prev_uv);
+
     vec4 debug = imageLoad(u_debug_texture, pixel);
-    float prev_ao = debug.a;
+
+    debug.r = float(hit.it) / float(MAX_TRAVERSAL_STEPS);
     indirect = mix(indirect, prev_indirect, u_hysteresis);
 
-    float ao = hit.hit
-        ? min(length(hit.pos - trace_origin) / u_radius, 1.0)
-        : prev_ao;
-    debug.a = mix(ao, prev_ao, u_hysteresis);
-    debug.r = float(hit.it) / float(MAX_TRAVERSAL_STEPS);
-    imageStore(u_indirect, pixel, vec4(indirect, 1.0));
+    imageStore(u_indirect, pixel, indirect);
     imageStore(u_debug_texture, pixel, debug);
 }

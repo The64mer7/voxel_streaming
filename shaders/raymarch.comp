@@ -952,7 +952,10 @@ void main()
             float ao = 1.f;
             if (ao_hit.t > 0.f)
             {
-                new_indirect.rgb = unpack_color(ao_hit.data) * (1+16*unpack_emissive(ao_hit.data));
+                float dist_sq = ao_hit.t * ao_hit.t;
+                float attenuation = 16.f / max(dist_sq, 1.f);
+
+                new_indirect.rgb = unpack_color(ao_hit.data) * (1 + unpack_emissive(ao_hit.data) * attenuation);
                 ao = min(ao_hit.t / u_ao_radius, 1.f);
             }
             else
@@ -963,14 +966,11 @@ void main()
             ivec2 prev_coords = ivec2(prev_uv * vec2(imageSize(u_albedo)));
             vec4 accum_indirect = texelFetch(u_prev_indirect_texture, prev_coords, 0);
 
-            if (u_gi == 1)
-            {
-                accum_indirect = mix(new_indirect, accum_indirect, u_hysteresis);
-                write_indirect(accum_indirect);
-            }
+            accum_indirect = mix(new_indirect, accum_indirect, u_hysteresis);
+            write_indirect(accum_indirect);
         }
     }
-    else
+    else if (u_gi == 1)
     {
         write_indirect(vec4(0));
     }

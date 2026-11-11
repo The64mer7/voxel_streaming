@@ -18,7 +18,7 @@ uniform float u_bias;
 void create_ray(ivec2 uvi, out vec3 ro, out vec3 rd)
 {
     ivec2 img_size = textureSize(u_depth, 0);
-
+    
     vec2 ndc = (vec2(uvi) + 0.5f) / vec2(img_size) * 2.0f - 1.0f;
     
     vec4 clip = u_inv_proj * vec4(ndc, -1.0f, 1.0f);

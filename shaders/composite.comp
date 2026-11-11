@@ -18,7 +18,7 @@ layout(std430, binding = 0) buffer IrradianceProbes
 layout(rgba8, binding = 0) uniform image2D u_albedo;
 layout(r16f, binding = 1) uniform image2D u_depth;
 layout(rgba16_snorm, binding = 2) uniform image2D u_normal;
-layout(rgba16, binding = 3) uniform image2D u_final;
+layout(rgba16f, binding = 3) uniform image2D u_final;
 layout(rgba16f, binding = 4) uniform image2D u_indirect_texture;
 
 layout(rg16f, binding = 5) uniform image2DArray u_probe_depths;
@@ -479,18 +479,21 @@ void main()
     if (u_display_texture == DISPLAY_FINAL)
     {
         float depth = imageLoad(u_depth, uvi).r;
+        vec3 hdr = vec3(0);
         if (depth < 0.f)
         {
-            vec3 sky_color = sample_skybox(rd);
-            imageStore(u_final, uvi, vec4(sky_color, 1.f));
-            return;
+            hdr = sample_skybox(rd);
         }
-        vec4 debug = texelFetch(u_debug_texture, uvi, 0);
-        //float ao = texture(u_ao, uv).r;
-        float ao = imageLoad(u_indirect_texture, uvi).a;
-//        float ao = debug.a;
-        vec3 incoming_light = calculate_incoming_light(uvi, ao);
-        vec3 hdr = incoming_light;
+        else
+        {
+            vec4 debug = texelFetch(u_debug_texture, uvi, 0);
+            float ao = imageLoad(u_indirect_texture, uvi).a;
+            vec3 incoming_light = calculate_incoming_light(uvi, ao);
+            hdr = incoming_light;
+        }
+        //vec3 prev_ldr = imageLoad(u_final, uvi).rgb;
+        //vec3 prev_hdr = prev_ldr/(vec3(1.f) - prev_ldr);
+        //hdr = mix(hdr, prev_hdr, 0.8f);
         imageStore(u_final, uvi, vec4(hdr, 1.f));
     }
     if (u_display_texture == DISPLAY_PROBE_DEPTH)
