@@ -6,16 +6,51 @@ uniform float u_exposure;
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
+vec3 luminance_values()
+{
+    return vec3(0.21, 0.71, 0.07);
+}
+
+float light_luminance(vec3 l)
+{
+    return dot(l, luminance_values());
+}
+
+float tonemap1f(float hdr, float exposure)
+{
+    return exposure * hdr / (1.f + exposure * hdr);
+}
+
+vec3 tonemap(vec3 hdr, float exposure)
+{
+    float hdr_luminance = dot(hdr.rgb, luminance_values());
+
+    if (hdr_luminance <= 0.00001f)
+        return vec3(0.0f);
+    
+    float ldr_luminance = tonemap1f(hdr_luminance, exposure);
+    vec3 ldr = exposure * hdr / (vec3(1.f) + exposure * hdr);
+    vec3 scaled_col = hdr * (ldr_luminance / hdr_luminance);
+
+    float max_luminance = 10.f;
+    float white_blend = clamp((hdr_luminance - 1.f) / max_luminance, 0.f, 1.f);
+    vec3 final_color = mix(scaled_col, vec3(1.f), white_blend);
+    return final_color;
+}
+
 void main()
 {
     vec4 mean_color = imageLoad(u_autoexposure, ivec2(0));
-    float luminance = max(mean_color.x, max(mean_color.y, mean_color.z));
+    float luminance = light_luminance(mean_color.rgb);
     float exposure = 0.1/(luminance + 0.01f);
 
     ivec2 iuv = ivec2(gl_GlobalInvocationID.xy);
     vec4 hdr = imageLoad(u_screen_texture, iuv);
+    
     vec4 ldr = exposure * hdr / (vec4(1) + exposure * hdr);
-    ldr = u_exposure * hdr / (vec4(1) + u_exposure * hdr);
+    ldr.rgb = tonemap(hdr.rgb, u_exposure);
+
+
     ldr = max(ldr, vec4(0.f));
     imageStore(u_screen_texture, iuv, vec4(ldr.rgb, 1));
 }

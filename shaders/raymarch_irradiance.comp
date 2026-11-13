@@ -418,7 +418,7 @@ vec3 unpack_color(uint data)
 
 float unpack_emissive(uint data)
 {
-    return float((data >> 24u) & 0xfu) / 2.f;
+    return float((data >> 24u) & 0xfu) / 16.f;
 }
 
 float hash_u4_f1n(uvec4 v)

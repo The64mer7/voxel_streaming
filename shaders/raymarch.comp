@@ -728,7 +728,7 @@ vec3 unpack_color(uint data)
 
 float unpack_emissive(uint data)
 {
-    return float((data >> 24u) & 0xfu) / 2.f;
+    return float((data >> 24u) & 0xfu) / 16.f;
 }
 
 vec3 hash_u1f3(uint v)
@@ -875,6 +875,17 @@ vec3 sun_dir()
 {
     return normalize(vec3(1,-1,1));
 }
+
+vec3 sun_color()
+{
+    return vec3(1.0, 0.85, 0.55);
+}
+
+float sun_intensity()
+{
+    return 32.f;
+}
+
 vec3 sample_skybox(vec3 rd)
 {
     float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
@@ -883,24 +894,36 @@ vec3 sample_skybox(vec3 rd)
     vec3 zenith_color = vec3(0.25, 0.5, 0.9);
     vec3 sky = mix(horizon_color, zenith_color, t);
 
-    vec3 sun_color = vec3(1.0, 0.85, 0.55) * 10.0;
     float sun = smoothstep(0.9995, 0.9998, dot(rd, -sun_dir()));
 
-    return sky + sun_color * sun;
+    return sky + sun_color() * sun_intensity() * sun;
 }
 
-float sample_shadow_factor(vec3 wp)
+vec3 compute_shadow_bias(vec3 wp, vec3 normal, vec3 light_dir) 
 {
-    return 1.f;
+    float normal_bias = 0.02f;
+    float light_bias = 0.01f;
+    return wp + (normal * normal_bias) + (light_dir * light_bias);
 }
 
-vec3 sample_direct_light(vec3 wp, vec3 normal)
+vec3 sample_direct_light(vec3 wp, vec3 normal, out float dist)
 {
-    vec3 sun_color = vec3(200, 182, 150)/255.f;
-    float sun_intensity = 2.f;
-    float n_dot_l = max(dot(normal, -sun_dir()), 0.f);
+    vec3 light_dir = -sun_dir(); 
+    
+    float n_dot_l = max(dot(normal, light_dir), 0.0f);
+    if (n_dot_l <= 0.0f) {
+        return vec3(0.0f);
+    }
 
-    return sun_intensity * sun_color * n_dot_l * sample_shadow_factor(wp);
+    vec3 ray_origin = compute_shadow_bias(wp, normal, light_dir);
+    
+    raymarch_hit sun_hit = raymarch_tree(u_chunk_size, ray_origin, light_dir);
+    dist = sun_hit.t;
+    
+    if (sun_hit.t >= 0.0f)
+        return vec3(0.0f);
+
+    return sun_intensity() * sun_color() * n_dot_l;
 }
 
 vec2 get_prev_uv(vec3 surface_wp)
@@ -932,6 +955,7 @@ void main()
     vec3 normal = vec3(0.f);
     float emissive = 0.f;
     vec4 debug = imageLoad(u_debug_texture, screen_coords());
+    debug.a = 0;
     vec4 new_indirect = vec4(0);
 
     if (hit.t >= -0.5f)
@@ -939,21 +963,22 @@ void main()
         albedo = unpack_color(hit.data);
         normal = get_normal(hit.data);
         emissive = unpack_emissive(hit.data);
+        vec3 flat_normal = hit.normal;
 
+        vec3 hit_pos = pos_along_ray(ro, rd, hit.t);
         if (u_gi == 1)
         {
-            ivec2 pixel = screen_coords() * 2651 + int(u_frame_index)*611191;
+            ivec2 pixel = screen_coords() * 2651 + int(u_frame_index) * 611191;
             uint seed = uint(pixel.x) + uint(pixel.y) * uint(imageSize(u_albedo).x);
 
-            vec3 flat_normal = hit.normal;
-            vec3 ao_ro = pos_along_ray(ro, rd, hit.t) + flat_normal * NORMAL_SIZE;
+            vec3 ao_ro = hit_pos + flat_normal * NORMAL_SIZE;
             vec3 ao_rd = random_hemisphere_direction(flat_normal, seed);
             raymarch_hit ao_hit = raymarch_tree(u_chunk_size, ao_ro, ao_rd);
             float ao = 1.f;
             if (ao_hit.t > 0.f)
             {
                 float dist_sq = ao_hit.t * ao_hit.t;
-                float attenuation = 16.f / max(dist_sq, 1.f);
+                float attenuation = 128.f / max(dist_sq, 1.f);
                 vec3 hit_albedo = unpack_color(ao_hit.data);
                 float hit_emissive_factor = unpack_emissive(ao_hit.data);
                 new_indirect.rgb = hit_albedo + hit_albedo * hit_emissive_factor * attenuation;
@@ -966,6 +991,10 @@ void main()
             vec2 prev_uv = get_prev_uv(pos_along_ray(ro, rd, hit.t));
             ivec2 prev_coords = ivec2(prev_uv * vec2(imageSize(u_albedo)));
             vec4 accum_indirect = texelFetch(u_prev_indirect_texture, prev_coords, 0);
+            float direct_depth;
+            vec3 direct = sample_direct_light(hit_pos, flat_normal, direct_depth);
+            debug.a = direct_depth;
+            new_indirect.rgb += direct;
 
             accum_indirect = mix(new_indirect, accum_indirect, u_hysteresis);
             write_indirect(accum_indirect);

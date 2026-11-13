@@ -16,6 +16,8 @@ uniform uint u_frame_index;
 uniform float u_hysteresis;
 uniform float u_radius;
 
+
+
 layout(rgba16f, binding = 0) uniform image2D u_indirect;
 layout(rgba16f, binding = 1) uniform image2D u_debug_texture;
 uniform sampler2D u_prev_indirect_texture;
@@ -320,11 +322,14 @@ vec2 get_prev_uv(vec3 surface_wp)
 vec3 sample_skybox(vec3 ray_direction)
 {
     float t = clamp(ray_direction.y * 0.5 + 0.5, 0.0, 1.0);
+    
     vec3 horizon_color = vec3(1.0, 0.55, 0.2);
     vec3 zenith_color = vec3(0.25, 0.5, 0.9);
     vec3 sky = mix(horizon_color, zenith_color, t);
+
     vec3 sun_color = vec3(1.0, 0.85, 0.55) * 10.0;
     float sun = smoothstep(0.9995, 0.9998, dot(ray_direction, -sun_dir()));
+
     return sky + sun_color * sun;
 }
 
@@ -349,8 +354,11 @@ void main()
     normal = normalize(normal);
 
     ivec2 seed_pixel = pixel * 2651 + int(u_frame_index) * 611191;
+
     uint seed = uint(seed_pixel.x) +
                 uint(seed_pixel.y) * uint(textureSize(u_albedo, 0).x);
+
+
     vec3 reflected = random_hemisphere_direction(normal, seed);
     vec3 world_pos = ray_origin + view_ray * depth;
     vec3 trace_origin = world_pos + normal * SURFACE_BIAS;
@@ -377,9 +385,11 @@ void main()
 
         emissive = imageLoad(u_debug_texture, debug_pixel).b;
         float dist_sq = hit.t * hit.t;
-        float attenuation = 16.f / max(dist_sq, 1.f);
-        indirect.rgb = hit_albedo * hit_indirect.rgb + hit_albedo * emissive * attenuation;
-        indirect.a = min(hit.t / u_radius, 1.f);
+        float attenuation = 128.f / max(dist_sq, 1.f);
+
+        vec3 emissive_radiance = hit_albedo * emissive * attenuation;
+        indirect.rgb = hit_albedo * hit_indirect.rgb + emissive_radiance;
+        indirect.a = hit_indirect.a * min(hit.t / u_radius, 1.f);
     }
     else
     {

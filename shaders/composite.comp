@@ -109,6 +109,7 @@ void create_ray(ivec2 uvi, out vec3 ro, out vec3 rd)
 #define DISPLAY_SSAO 13
 #define DISPLAY_INDIRECT 14
 #define DISPLAY_HZB 15
+#define DISPLAY_DIRECT_DEPTH 16
 
 vec3 trilinear_interpolate(
     vec3 c000, vec3 c100, vec3 c010, vec3 c110,
@@ -323,13 +324,17 @@ vec3 calculate_incoming_light(ivec2 uvi, float ao)
         
         vec3 indirect_light;
         if (u_ddgi == 1)
+        {
             indirect_light = sample_indirect_light(quantized_hit_p, normal);
+            imageStore(u_indirect_texture, uvi, vec4(indirect_light, 1.f));
+        }
         else
             indirect_light = imageLoad(u_indirect_texture, uvi).rgb;
 
         vec3 direct_light = sample_direct_light(quantized_hit_p, normal) * brdf;
         vec3 diffuse_indirect = indirect_light * (albedo / 3.14159) * ao;
-        vec3 emissive = emissive_factor * albedo;
+        float attenuation = 128.f;
+        vec3 emissive = attenuation * emissive_factor * albedo;
 
         float emissive_max = max(emissive.r, max(emissive.g, emissive.b));
         if (emissive_max > 1.f)
@@ -431,6 +436,11 @@ void main()
     {
         vec4 debug = texelFetch(u_debug_texture, uvi, 0);
         imageStore(u_final, uvi, vec4(debug.r * u_brightness, 0,0,1));
+    }
+    if (u_display_texture == DISPLAY_DIRECT_DEPTH)
+    {
+        float direct_depth = texelFetch(u_debug_texture, uvi, 0).a;
+        imageStore(u_final, uvi, vec4(direct_depth * u_brightness, 0,0,1));
     }
     if (u_display_texture == DISPLAY_DEBUG_EMISSIVE)
     {

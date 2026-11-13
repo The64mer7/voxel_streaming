@@ -223,7 +223,8 @@ public:
 
         if (true)
         {
-            MeshContree::create("meshes/sponza/sponza.obj");
+            // MeshContree::create("meshes/sponza/sponza.obj");
+            MeshContree::create("meshes/doom/doom_E1M1.obj");
 
             auto root_aabb = MeshContree::get_bvh().nodes[0].aabb;
             ame_vec3 bvh_size = ame_vec3_sub(&root_aabb.max, &root_aabb.min);
@@ -998,9 +999,10 @@ public:
                 BallContree::ball.z = wp.z;
 
                 aabbs.clear();
-
-                brush_color = input.is_key_held(GLFW_KEY_T) ? (brush_color | 0xf000000u)
-                                                            : brush_color;
+                uint32_t random_emissive = rand() % 16;
+                brush_color = input.is_key_held(GLFW_KEY_T)
+                                  ? (brush_color | (random_emissive << 24u))
+                                  : brush_color;
                 BallContree::color = brush_color;
                 BallContree::clear = input.is_key_held(GLFW_KEY_E);
 
@@ -1232,7 +1234,7 @@ public:
     inline static const char* g_buffer_names[] = {
         "final",       "albedo",      "depth",          "normal", "indirect_ddgi", "subdiv_depth",
         "iterations",  "probe_depth", "probe_color",    "ao",     "world_pos",     "emissive",
-        "flat_normal", "ssao",        "indirect_trace", "hzb"};
+        "flat_normal", "ssao",        "indirect_trace", "hzb",    "direct_depth"};
     Texture albedo_texture;
     Texture depth_texture;
     Texture normals_texture;
@@ -1269,7 +1271,7 @@ public:
     float probe_spacing = 8.f;
     float probe_point_size = 3.f;
     float hysteresis = 0.95f;
-    int max_depth = 4;
+    int max_depth = 6;
     int blur_kernel_half_size = 2;
     int probe_resolution = 16;
 };
